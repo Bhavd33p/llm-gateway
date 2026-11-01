@@ -64,11 +64,18 @@ func (b *Breaker) Allow() bool {
 	}
 }
 
+// Success closes a half-open breaker (the probe worked) and resets the failure streak of a closed one. While open
+// it is ignored: a slow request that started before the breaker tripped must not skip the cooldown and probe.
 func (b *Breaker) Success() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.failures, b.probing = 0, false
-	b.setState(Closed)
+	switch b.state {
+	case HalfOpen:
+		b.failures, b.probing = 0, false
+		b.setState(Closed)
+	case Closed:
+		b.failures = 0
+	}
 }
 
 func (b *Breaker) Failure() {

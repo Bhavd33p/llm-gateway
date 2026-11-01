@@ -94,3 +94,17 @@ func TestBreakerAbandonedProbeExpires(t *testing.T) {
 		t.Fatal("an abandoned probe must not block the breaker forever")
 	}
 }
+
+func TestBreakerIgnoresLateSuccessWhileOpen(t *testing.T) {
+	b, clock, _ := newTestBreaker(2, 10*time.Second)
+	b.Failure()
+	b.Failure() // open
+	b.Success() // a slow request that started before the breaker tripped finishes now
+	if b.State() != Open || b.Allow() {
+		t.Fatalf("a late success must not close an open breaker, state=%v", b.State())
+	}
+	clock.advance(10 * time.Second)
+	if !b.Allow() || b.State() != HalfOpen {
+		t.Fatal("after the cooldown a probe should still be required")
+	}
+}
