@@ -303,7 +303,8 @@ func (s *routedStream) finish(outcome string) {
 }
 
 // classify labels an attempt's error for metrics and decides whether another attempt could succeed.
-// 4xx (except 429) is not retried: the same request would be rejected by any upstream.
+// Other 4xx are not retried: the same request would be rejected by any upstream. 401 and 403 are the exception,
+// because they are about this upstream's credentials, not the request, so another upstream may well succeed.
 func classify(err error) (reason string, retryable bool) {
 	var statusErr *provider.StatusError
 	var netErr net.Error
@@ -312,6 +313,8 @@ func classify(err error) (reason string, retryable bool) {
 		switch {
 		case statusErr.StatusCode == http.StatusTooManyRequests:
 			return "status_429", true
+		case statusErr.StatusCode == http.StatusUnauthorized, statusErr.StatusCode == http.StatusForbidden:
+			return "status_auth", true
 		case statusErr.StatusCode >= 500:
 			return "status_5xx", true
 		default:

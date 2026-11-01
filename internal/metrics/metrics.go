@@ -88,7 +88,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		}, []string{"upstream", "outcome"}),
 		UpstreamErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "llm_gateway_upstream_errors_total",
-			Help: "Failed upstream attempts, by reason (connect, timeout, status_5xx, status_429, status_4xx, stream, protocol).",
+			Help: "Failed upstream attempts, by reason (connect, timeout, status_5xx, status_429, status_auth, status_4xx, stream, protocol).",
 		}, []string{"upstream", "reason"}),
 		Failovers: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "llm_gateway_failovers_total",

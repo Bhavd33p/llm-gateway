@@ -294,3 +294,16 @@ func TestClientCancellationStopsRetries(t *testing.T) {
 		t.Fatalf("err=%v good calls=%d, want context.Canceled and no failover", err, good.calls.Load())
 	}
 }
+
+func TestUpstreamAuthFailureFailsOver(t *testing.T) {
+	revoked := failing("revoked", &provider.StatusError{StatusCode: 401, Body: "invalid x-api-key"})
+	good := ok("good")
+	r, m := newRouter(t, Options{}, revoked, good)
+	_, served, err := r.Complete(context.Background(), &provider.ChatRequest{})
+	if err != nil || served.Upstream != "good" {
+		t.Fatalf("served=%+v err=%v, want failover past the upstream with a bad key", served, err)
+	}
+	if got := testutil.ToFloat64(m.UpstreamErrors.WithLabelValues("revoked", "status_auth")); got != 1 {
+		t.Errorf("status_auth errors = %v, want 1", got)
+	}
+}
