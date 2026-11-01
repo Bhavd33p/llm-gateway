@@ -32,11 +32,21 @@ type Server struct {
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
 }
 
+// Redis holds the connection settings. The timeouts are deliberately tight: Redis only backs optional features
+// (cache, rate limits, ledger), so a slow or dead Redis must cost a request milliseconds, not seconds.
 type Redis struct {
-	Addr        string `yaml:"addr"`
-	PasswordEnv string `yaml:"password_env"`
-	DB          int    `yaml:"db"`
-	PoolSize    int    `yaml:"pool_size"`
+	Addr         string        `yaml:"addr"`
+	PasswordEnv  string        `yaml:"password_env"`
+	DB           int           `yaml:"db"`
+	PoolSize     int           `yaml:"pool_size"`
+	DialTimeout  time.Duration `yaml:"dial_timeout"`
+	ReadTimeout  time.Duration `yaml:"read_timeout"`
+	WriteTimeout time.Duration `yaml:"write_timeout"`
+	PoolTimeout  time.Duration `yaml:"pool_timeout"`
+	// MaxRetries is how many times a failed command is retried; 0 means no retries.
+	MaxRetries              int           `yaml:"max_retries"`
+	BreakerFailureThreshold int           `yaml:"breaker_failure_threshold"`
+	BreakerCooldown         time.Duration `yaml:"breaker_cooldown"`
 
 	Password string `yaml:"-"`
 }
@@ -148,6 +158,12 @@ func (c *Config) applyDefaults() {
 	setDefault(&c.Server.ShutdownTimeout, 30*time.Second)
 
 	setDefault(&c.Redis.Addr, "localhost:6379")
+	setDefault(&c.Redis.DialTimeout, 50*time.Millisecond)
+	setDefault(&c.Redis.ReadTimeout, 50*time.Millisecond)
+	setDefault(&c.Redis.WriteTimeout, 50*time.Millisecond)
+	setDefault(&c.Redis.PoolTimeout, 50*time.Millisecond)
+	setDefault(&c.Redis.BreakerFailureThreshold, 5)
+	setDefault(&c.Redis.BreakerCooldown, 5*time.Second)
 
 	setDefault(&c.Routing.MaxAttempts, 3)
 	setDefault(&c.Routing.BackoffBase, 50*time.Millisecond)
@@ -233,6 +249,9 @@ func (c *Config) validate() error {
 	var errs []error
 	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
 
+	if c.Redis.MaxRetries < 0 {
+		add("redis.max_retries must not be negative")
+	}
 	if c.Routing.MaxAttempts < 1 {
 		add("routing.max_attempts must be at least 1")
 	}

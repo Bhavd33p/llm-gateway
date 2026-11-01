@@ -25,6 +25,9 @@ func TestParseAppliesDefaults(t *testing.T) {
 	if cfg.Server.Addr != ":8080" || cfg.Server.ShutdownTimeout != 30*time.Second {
 		t.Errorf("server defaults not applied: %+v", cfg.Server)
 	}
+	if r := cfg.Redis; r.DialTimeout != 50*time.Millisecond || r.ReadTimeout != 50*time.Millisecond || r.MaxRetries != 0 || r.BreakerCooldown != 5*time.Second {
+		t.Errorf("redis defaults not applied: %+v", r)
+	}
 	if cfg.Routing.MaxAttempts != 3 || cfg.Routing.BreakerFailureThreshold != 5 {
 		t.Errorf("routing defaults not applied: %+v", cfg.Routing)
 	}
@@ -105,6 +108,10 @@ func TestParseRejectsInvalidConfig(t *testing.T) {
 		"missing rate limit": {
 			yaml:    strings.Replace(minimalConfig, "rate_limit: {requests_per_second: 5, burst: 10}", "rate_limit: {}", 1),
 			wantErr: "rate_limit",
+		},
+		"negative redis retries": {
+			yaml:    minimalConfig + "\nredis: {max_retries: -1}\n",
+			wantErr: "max_retries",
 		},
 		"threshold above one": {
 			yaml:    minimalConfig + "\ncache: {threshold: 1.5}\n",

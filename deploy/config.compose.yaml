@@ -10,6 +10,15 @@ redis:
   addr: "redis:6379"
   # password_env: REDIS_PASSWORD
   db: 0
+  # Redis only backs optional features, so an outage must be cheap: tight timeouts, no retries, and a breaker that
+  # skips Redis entirely for a cooldown after consecutive failures (each feature then fails open; see README).
+  dial_timeout: 50ms
+  read_timeout: 50ms
+  write_timeout: 50ms
+  pool_timeout: 50ms
+  max_retries: 0
+  breaker_failure_threshold: 5
+  breaker_cooldown: 5s
 
 routing:
   max_attempts: 3               # total tries across upstreams, including the first
