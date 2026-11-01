@@ -249,7 +249,8 @@ cmd/mockprovider    fake OpenAI-compatible upstream with latency and failure inj
 cmd/loadtest        concurrent streaming load generator
 internal/config     YAML config, defaults, validation
 internal/provider   wire types, OpenAI-compatible and Anthropic adapters, pooled HTTP clients
-internal/router     weighted round-robin, failover, circuit breaker, backoff
+internal/router     weighted round-robin, failover, backoff
+internal/breaker    consecutive-failure circuit breaker (per upstream, and around Redis)
 internal/cache      embedders, cosine similarity, Redis semantic cache with LRU
 internal/ratelimit  token bucket Lua script
 internal/cost       pricing and the micro-dollar ledger

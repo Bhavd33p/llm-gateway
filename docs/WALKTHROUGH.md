@@ -16,7 +16,7 @@ concept per commit (`git log --reverse --oneline`).
 | 3 | `internal/provider/transport.go` | `NewHTTPClient`: the per-upstream connection pool |
 | 4 | `internal/provider/sse.go`, `openai.go` | Reading server-sent events; the OpenAI-compatible adapter |
 | 5 | `internal/provider/anthropic.go` | Translating to and from the Anthropic Messages API, including its typed stream events |
-| 6 | `internal/router/backoff.go`, `breaker.go` | Full-jitter backoff; the circuit breaker state machine |
+| 6 | `internal/router/backoff.go`, `internal/breaker/breaker.go` | Full-jitter backoff; the circuit breaker state machine |
 | 7 | `internal/router/router.go` | Weighted pick, failover loop, retry-before-first-token |
 | 8 | `internal/ratelimit/tokenbucket.lua`, `ratelimit.go` | The token bucket as one atomic Redis script |
 | 9 | `internal/cache/vector.go`, `embedder.go` | Cosine similarity, vector encoding, the two embedders |
@@ -58,7 +58,7 @@ HTTP stack to mock upstreams).
   gateway's own key) records the error, marks the breaker and moves to the next candidate after a backoff. Any other
   4xx is returned to the client immediately: every upstream would reject the same request.
 * `classify`: turns an error into a metrics reason and a retry decision.
-* `internal/router/breaker.go`, `Breaker`: closed, then open after N consecutive failures, then half-open after a
+* `internal/breaker/breaker.go`, `Breaker`: closed, then open after N consecutive failures, then half-open after a
   cooldown, admitting one probe whose result closes or reopens it.
 
 ### "streaming response passthrough"

@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/Bhavd33p/llm-gateway/internal/breaker"
 	"github.com/Bhavd33p/llm-gateway/internal/metrics"
 	"github.com/Bhavd33p/llm-gateway/internal/provider"
 )
@@ -201,8 +202,8 @@ func TestOpenBreakerSkipsUpstream(t *testing.T) {
 	if got := bad.calls.Load(); got != 2 {
 		t.Errorf("bad upstream called %d times, want 2 (then its breaker opens)", got)
 	}
-	if got := testutil.ToFloat64(m.BreakerState.WithLabelValues("bad")); got != float64(Open) {
-		t.Errorf("breaker gauge = %v, want %v (open)", got, float64(Open))
+	if got := testutil.ToFloat64(m.BreakerState.WithLabelValues("bad")); got != float64(breaker.Open) {
+		t.Errorf("breaker gauge = %v, want %v (open)", got, float64(breaker.Open))
 	}
 }
 

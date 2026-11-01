@@ -1,4 +1,6 @@
-package router
+// Package breaker is a consecutive-failure circuit breaker, shared by the router (one per upstream) and the Redis
+// client (one for the whole connection).
+package breaker
 
 import (
 	"sync"
@@ -17,8 +19,8 @@ func (s State) String() string {
 	return [...]string{"closed", "half-open", "open"}[s]
 }
 
-// Breaker is a consecutive-failure circuit breaker. It stops the router from spending attempts (and the
-// client's latency budget) on an upstream that is clearly down, and lets a single probe test it after a cooldown.
+// Breaker opens after a run of consecutive failures, so callers stop spending time on a dependency that is clearly
+// down, and lets a single probe test it after a cooldown.
 type Breaker struct {
 	mu        sync.Mutex
 	threshold int
@@ -33,7 +35,7 @@ type Breaker struct {
 	probing      bool
 }
 
-func NewBreaker(threshold int, cooldown time.Duration, onChange func(State)) *Breaker {
+func New(threshold int, cooldown time.Duration, onChange func(State)) *Breaker {
 	if onChange == nil {
 		onChange = func(State) {}
 	}

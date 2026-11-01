@@ -1,4 +1,4 @@
-package router
+package breaker
 
 import (
 	"testing"
@@ -13,7 +13,7 @@ func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 func newTestBreaker(threshold int, cooldown time.Duration) (*Breaker, *fakeClock, *[]State) {
 	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
 	var transitions []State
-	b := NewBreaker(threshold, cooldown, func(s State) { transitions = append(transitions, s) })
+	b := New(threshold, cooldown, func(s State) { transitions = append(transitions, s) })
 	b.now = clock.now
 	return b, clock, &transitions
 }

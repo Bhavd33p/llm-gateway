@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Bhavd33p/llm-gateway/internal/breaker"
 	"github.com/Bhavd33p/llm-gateway/internal/metrics"
 	"github.com/Bhavd33p/llm-gateway/internal/provider"
 )
@@ -49,7 +50,7 @@ type Served struct {
 type upstream struct {
 	Upstream
 	name    string
-	breaker *Breaker
+	breaker *breaker.Breaker
 	current int // smooth weighted round-robin score, guarded by Router.mu
 }
 
@@ -68,11 +69,11 @@ func New(upstreams []Upstream, opts Options, m *metrics.Metrics) *Router {
 	for _, u := range upstreams {
 		name := u.Provider.Name()
 		gauge := m.BreakerState.WithLabelValues(name)
-		gauge.Set(float64(Closed))
+		gauge.Set(float64(breaker.Closed))
 		r.upstreams = append(r.upstreams, &upstream{
 			Upstream: u,
 			name:     name,
-			breaker:  NewBreaker(opts.BreakerThreshold, opts.BreakerCooldown, func(s State) { gauge.Set(float64(s)) }),
+			breaker:  breaker.New(opts.BreakerThreshold, opts.BreakerCooldown, func(s breaker.State) { gauge.Set(float64(s)) }),
 		})
 		r.totalWeight += u.Weight
 	}
