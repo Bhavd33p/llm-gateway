@@ -23,9 +23,10 @@ concept per commit (`git log --reverse --oneline`).
 | 10 | `internal/cache/semantic.go` | Redis key layout, `Lookup` and `Store` with LRU eviction |
 | 11 | `internal/cost/cost.go` | Integer pricing, the ledger, usage estimation |
 | 12 | `internal/metrics/metrics.go` | Every Prometheus series in one place, with the PromQL for each derived number |
-| 13 | `internal/server/server.go`, `sse.go`, `chat.go` | The request pipeline that ties it all together |
-| 14 | `cmd/gateway/main.go` | Wiring and graceful shutdown |
-| 15 | `internal/mockllm`, `cmd/mockprovider`, `cmd/loadtest` | How the tests, demos and benchmarks get a controllable upstream and load |
+| 13 | `internal/redisguard/redisguard.go` | The Redis client: tight timeouts, no retries, a breaker hook so an outage costs milliseconds |
+| 14 | `internal/server/server.go`, `sse.go`, `chat.go` | The request pipeline that ties it all together |
+| 15 | `cmd/gateway/main.go` | Wiring and graceful shutdown |
+| 16 | `internal/mockllm`, `cmd/mockprovider`, `cmd/loadtest` | How the tests, demos and benchmarks get a controllable upstream and load |
 
 Tests sit next to each file. The most instructive ones are `internal/router/router_test.go` (failover and
 retry-before-first-token as executable examples) and `internal/server/server_test.go` (end-to-end through the real
@@ -175,7 +176,8 @@ A client sends `POST /v1/chat/completions` with `"stream": true`. In `internal/s
 2. **Authenticate.** `Server.authenticate` takes the Bearer token (or `X-API-Key`), hashes it with SHA-256 and looks
    the digest up in a map built from config. No match: `401`.
 3. **Rate limit.** `Server.allow` runs the token-bucket script for `rl:{tenant}`. Empty bucket: `429` with
-   `Retry-After`. Redis error: log, count `llm_gateway_dependency_errors_total{component="ratelimit"}`, let it through.
+   `Retry-After`. Redis unavailable: count `llm_gateway_redis_unavailable_total{component="ratelimit"}` and let the
+   request through (see "What if Redis is down?" below).
 4. **Decode.** The body is capped with `http.MaxBytesReader` and decoded into `provider.ChatRequest`.
 5. **Cache lookup.** Unless the tenant disabled the cache or the client sent `Cache-Control: no-cache`,
    `Server.lookup` embeds `PromptText(model, messages)` once and calls `Cache.Lookup`. On a hit, `serveHit` writes the
@@ -254,9 +256,27 @@ script runs atomically, makes one round trip, and with `TIME` every replica uses
 allows bursts up to the capacity while holding the long-run rate; a fixed window allows double bursts at window edges,
 and a sliding log stores every request.
 
-**Fail open.** If Redis is unreachable the rate limiter allows, the cache misses and the ledger logs an error. The
-choice is availability over strict enforcement; each failure is counted in `llm_gateway_dependency_errors_total` so it
-is visible. A billing-critical deployment might fail closed for rate limiting instead.
+**What if Redis is down? Fail open, and fail fast.** Redis backs three optional features, so the gateway keeps serving
+without it. Each feature has an explicit outage behaviour, counted in
+`llm_gateway_redis_unavailable_total{component}`:
+
+| Feature | While Redis is unavailable | Trade-off |
+|---|---|---|
+| Rate limiting (`ratelimit`) | The request is allowed unchecked | Availability over enforcement: a tenant can exceed its limit during the outage. A deployment where limits protect billing or a fragile upstream could fail closed instead (return 503). |
+| Cache lookup (`cache_lookup`) | Served as a miss, and the answer is not stored | Every request goes upstream: correct answers, higher cost and latency until Redis returns. |
+| Cost ledger (`ledger`) | The ledger write is skipped and counted | The monthly ledger has a gap for the outage. The Prometheus spend and token counters still increase, so spend stays visible and can be reconciled from them. |
+
+Failing open only helps if failing is quick. With go-redis defaults (5 dial attempts 100 ms apart, then 3 command
+retries) each Redis call spent over a second failing, and a request made four of them: the measured request time with
+Redis down was 5485.04 ms. `internal/redisguard` fixes this in two layers. Tight timeouts (50 ms dial, read, write and
+pool wait, one dial attempt, no command retries) bound the first failures. A circuit breaker hook around every
+command and pipeline then opens after 5 consecutive failures and refuses calls locally (no network at all) for a 5 s
+cooldown, then lets one probe through and closes when Redis answers. Measured request time with Redis down after the
+fix: 0.92 ms at p50 (BENCHMARKS.md). The breaker logs each state change once instead of every request logging an error.
+
+The timeouts are tight because the slowest healthy call is small: the heaviest benchmark (1000-entry cache scans at
+1318 req/s) ran with zero Redis timeouts at 50 ms. `/readyz` still pings Redis through the breaker, so an orchestrator
+sees the gateway as not ready while Redis is down, even though requests are served.
 
 **Integer money.** Floats cannot represent 0.1 exactly and errors accumulate over millions of additions. Prices
 become integers once at startup, costs are exact integer products in picodollars, and the ledger stores whole
@@ -290,6 +310,9 @@ answer is a hit.
   so exact totals can be recomputed.
 * Tenants come from the config file; changing them needs a restart. There is no TLS termination; run behind a proxy or
   load balancer for that.
+* During a Redis outage there is no rate limiting, no caching and no ledger (see section 4), and recovery takes up to
+  one breaker cooldown (5 s) after Redis returns. A probe can also reach a Redis that is back but not yet warm; the
+  first failed call simply reopens the breaker for another cooldown.
 * Tested against single-node Redis only. The key layout is cluster-ready but has not been run on a cluster.
 * Benchmarks ran on one laptop with mock upstreams (see BENCHMARKS.md for caveats). The Docker image is built and
   checked in CI; the compose stack was not run locally while writing this.
@@ -372,8 +395,12 @@ are histograms, not gauges.
 **19. Why measure TTFT separately from total latency?** For streaming UIs, the user perceives the first token; total
 time mostly reflects answer length. A gateway should add almost nothing to TTFT; the benchmark measured 2.06 ms at p50.
 
-**20. What happens if Redis goes down?** Requests are still served: rate limiting fails open, the cache misses, ledger
-writes fail and are counted. `/readyz` reports not ready so an orchestrator can react.
+**20. What if Redis is down?** Requests are still served, and quickly. Rate limiting fails open, the cache serves a
+miss and skips the store, and the ledger write is skipped (Prometheus still counts spend); each is counted in
+`llm_gateway_redis_unavailable_total`. Fast matters as much as open: with go-redis defaults a request waited about
+5.5 s on dial retries, so the client has 50 ms timeouts, no retries and a circuit breaker that skips Redis entirely
+for 5 s after 5 consecutive failures. Measured: 5485.04 ms before, 0.92 ms after at p50, and no failed requests when
+Redis was killed and restarted under load. `/readyz` reports not ready so an orchestrator can react.
 
 **21. How does graceful shutdown work with long streams?** On SIGTERM, `http.Server.Shutdown` stops accepting
 connections and waits up to 30 s for in-flight requests, including open streams. At the deadline, `Close` drops the

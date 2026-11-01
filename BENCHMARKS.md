@@ -115,6 +115,42 @@ takes hundreds of milliseconds, a hit is still far cheaper than a call, as the r
 * With `mock-a` hard down, the result is the same shape: it saw 40 requests in 30 s (all failed),
   `mock-b` served all 2250, and upstreams with an open breaker are skipped without spending an attempt.
 
+### Redis outage
+
+The fail-fast change was measured separately from the runs above, on the same machine: "before" is commit `9980b08`,
+"after" is commit `8016890` (later commits only change docs and the dashboard). The gateway used `config.example.yaml`
+with `redis.addr` set to `127.0.0.1:6489` and both mocks at zero latency, so request time is the gateway's own time.
+"Redis down" means nothing listening on that port, so every connection is refused.
+
+| Scenario | Code | Requests | Succeeded | Latency p50 | Latency p99 | TTFT p50 | Other |
+|---|---|---:|---:|---:|---:|---:|---|
+| Redis down, 10 sequential streaming requests | before | 10 | 10 | 5485.04 ms | 5528.61 ms | 3483.73 ms | |
+| Redis down, 10 sequential streaming requests | after | 10 | 10 | 0.92 ms | 4.08 ms | 0.36 ms | |
+| Redis down, 50 concurrent streams, 20 s | after | 82411 | 82411 | 11.97 ms | 17.38 ms | 10.58 ms | 4118.2 req/s |
+| Redis killed at about 5 s and restarted at about 12 s, 50 streams, 20 s, dup ratio 0.5 | after | 54570 | 54570 | 13.24 ms | 46.12 ms | 12.03 ms | max latency 62.23 ms |
+| Healthy Redis, heaviest cache load (0% hits, 1000-entry scans), 50 streams, 20 s | after | 26397 | 26397 | 38.83 ms | 54.03 ms | 32.98 ms | 0 Redis failures, breaker stayed closed |
+
+* **Before:** every request made four Redis calls (rate limit, cache lookup, cache store, ledger). With go-redis
+  defaults each call made 5 dial attempts 100 ms apart and was retried up to 3 times, so a request took 5485.04 ms
+  at p50. 3483.73 ms of that came before the first token (rate limit and cache lookup); the rest came after the
+  answer (store and ledger).
+* **After:** the first calls fail in milliseconds (one dial attempt, no retries). After 5 consecutive failures the
+  breaker opens and calls are refused locally without touching the network, so a request took 0.92 ms at p50. Under
+  50 concurrent streams the gateway served 4118.2 req/s with Redis down. That is faster than with a healthy Redis,
+  because it skips the cache scan.
+* **Kill and restart under load:** no request failed, and the slowest took 62.23 ms. The breaker log shows the
+  recovery:
+  * opened at 21:35:21, when Redis was killed;
+  * probed at 21:35:26 and reopened, because Redis was still down;
+  * probed at 21:35:31 and closed, 3 s after Redis was restarted at 21:35:28.
+  * The hit rate was 13.75% because the cache was unavailable during the outage and empty after the restart
+    (benchmark Redis runs without persistence).
+* **Healthy Redis:** the 50 ms timeouts do not misfire. The heaviest cache workload ran without a single Redis
+  failure, at the same throughput as the capacity run above.
+* **Not measured:** a network partition, where packets are dropped instead of refused. There, each failure before the
+  breaker opens waits for the 50 ms dial timeout, so roughly the first two requests would be slowed by up to about
+  200 ms each. After that the breaker skips Redis in the same way.
+
 ### Go micro-benchmarks (`make bench`)
 
 | Benchmark | Result |
@@ -317,5 +353,128 @@ mock-b log: "requests":2250,"failures":0,"cancelled":0
 BenchmarkHashEmbed-18    	 1000000	      1180 ns/op	    1312 B/op	       2 allocs/op
 BenchmarkCosine256-18    	 6437846	       172.6 ns/op	       0 B/op	       0 allocs/op
 BenchmarkPick-18    	12689125	        91.03 ns/op	      24 B/op	       1 allocs/op
+```
+</details>
+
+<details><summary>Redis outage: before (9980b08)</summary>
+
+```
+== BEFORE (9980b08): Redis down, nothing listening on 127.0.0.1:6489; zero-latency mocks; 10 sequential streaming requests ==
+target          http://127.0.0.1:28471 (stream=true, model=gpt-4o-mini, no-cache=false)
+concurrency     1
+dup ratio       0.00 over 20 hot prompts
+elapsed         54.86s
+requests        10 total, 10 ok, 0 failed (100.00% success)
+throughput      0.2 req/s (successful requests / elapsed)
+cache hit rate  0.00% (X-Cache: HIT among successful requests)
+                    n        p50        p95        p99        max
+latency all         10  5485.04ms  5528.61ms  5528.61ms  5528.61ms
+latency miss        10  5485.04ms  5528.61ms  5528.61ms  5528.61ms
+ttft all            10  3483.73ms  3526.24ms  3526.24ms  3526.24ms
+ttft miss           10  3483.73ms  3526.24ms  3526.24ms  3526.24ms
+llm_gateway_dependency_errors_total{component="cache"} 20
+llm_gateway_dependency_errors_total{component="ledger"} 10
+llm_gateway_dependency_errors_total{component="ratelimit"} 10
+llm_gateway_requests_total{code="200",tenant="loadtest"} 10
+```
+</details>
+
+<details><summary>Redis outage: after (8016890), Redis down</summary>
+
+```
+== AFTER (8016890): Redis down, nothing listening on 127.0.0.1:6489; zero-latency mocks; 10 sequential streaming requests ==
+target          http://127.0.0.1:28471 (stream=true, model=gpt-4o-mini, no-cache=false)
+concurrency     1
+dup ratio       0.00 over 20 hot prompts
+elapsed         0.01s
+requests        10 total, 10 ok, 0 failed (100.00% success)
+throughput      817.0 req/s (successful requests / elapsed)
+cache hit rate  0.00% (X-Cache: HIT among successful requests)
+                    n        p50        p95        p99        max
+latency all         10     0.92ms     4.08ms     4.08ms     4.08ms
+latency miss        10     0.92ms     4.08ms     4.08ms     4.08ms
+ttft all            10     0.36ms     3.33ms     3.33ms     3.33ms
+ttft miss           10     0.36ms     3.33ms     3.33ms     3.33ms
+llm_gateway_redis_breaker_state 2
+llm_gateway_redis_unavailable_total{component="cache_lookup"} 10
+llm_gateway_redis_unavailable_total{component="ledger"} 10
+llm_gateway_redis_unavailable_total{component="ratelimit"} 10
+llm_gateway_requests_total{code="200",tenant="loadtest"} 10
+== AFTER (8016890): Redis still down, 50 concurrent streams, 20 s ==
+target          http://127.0.0.1:28471 (stream=true, model=gpt-4o-mini, no-cache=false)
+concurrency     50
+dup ratio       0.00 over 20 hot prompts
+elapsed         20.01s
+requests        82411 total, 82411 ok, 0 failed (100.00% success)
+throughput      4118.2 req/s (successful requests / elapsed)
+cache hit rate  0.00% (X-Cache: HIT among successful requests)
+                    n        p50        p95        p99        max
+latency all      82411    11.97ms    15.17ms    17.38ms    29.98ms
+latency miss     82411    11.97ms    15.17ms    17.38ms    29.98ms
+ttft all         82411    10.58ms    13.10ms    14.92ms    28.45ms
+ttft miss        82411    10.58ms    13.10ms    14.92ms    28.45ms
+llm_gateway_redis_breaker_state 2
+llm_gateway_redis_unavailable_total{component="cache_lookup"} 82421
+llm_gateway_redis_unavailable_total{component="ledger"} 82421
+llm_gateway_redis_unavailable_total{component="ratelimit"} 82421
+llm_gateway_requests_total{code="200",tenant="loadtest"} 82421
+redis: 2026/11/01 21:34:38 pool.go:770: redis: connection pool: failed to dial after 1 attempts: dial tcp 127.0.0.1:6489: connect: connection refused
+redis: 2026/11/01 21:34:38 pool.go:770: redis: connection pool: failed to dial after 1 attempts: dial tcp 127.0.0.1:6489: connect: connection refused
+redis: 2026/11/01 21:34:38 pool.go:770: redis: connection pool: failed to dial after 1 attempts: dial tcp 127.0.0.1:6489: connect: connection refused
+redis: 2026/11/01 21:34:38 pool.go:770: redis: connection pool: failed to dial after 1 attempts: dial tcp 127.0.0.1:6489: connect: connection refused
+redis: 2026/11/01 21:34:38 pool.go:770: redis: connection pool: failed to dial after 1 attempts: dial tcp 127.0.0.1:6489: connect: connection refused
+redis: 2026/11/01 21:34:38 pool.go:770: redis: connection pool: failed to dial after 1 attempts: dial tcp 127.0.0.1:6489: connect: connection refused
+{"time":"2026-11-01T21:34:38.397697+05:30","level":"WARN","msg":"redis circuit breaker changed state","state":"open"}
+{"time":"2026-11-01T21:34:43.397761+05:30","level":"WARN","msg":"redis circuit breaker changed state","state":"half-open"}
+```
+</details>
+
+<details><summary>Redis outage: after (8016890), kill and restart under load</summary>
+
+```
+== AFTER (8016890): Redis up, killed at ~5 s, restarted at ~12 s; zero-latency mocks, 50 streams, 20 s ==
+kill 21:35:21
+restart 21:35:28
+target          http://127.0.0.1:28471 (stream=true, model=gpt-4o-mini, no-cache=false)
+concurrency     50
+dup ratio       0.50 over 20 hot prompts
+elapsed         20.02s
+requests        54570 total, 54570 ok, 0 failed (100.00% success)
+throughput      2726.1 req/s (successful requests / elapsed)
+cache hit rate  13.75% (X-Cache: HIT among successful requests)
+                    n        p50        p95        p99        max
+latency all      54570    13.24ms    39.99ms    46.12ms    62.23ms
+latency hit       7506    33.09ms    39.41ms    43.34ms    46.26ms
+latency miss     47064    12.93ms    40.17ms    46.49ms    62.23ms
+ttft all         54570    12.03ms    35.13ms    39.42ms    48.70ms
+ttft hit          7506    33.08ms    39.40ms    43.34ms    46.25ms
+ttft miss        47064    11.74ms    32.53ms    37.00ms    48.70ms
+llm_gateway_redis_breaker_state 0
+llm_gateway_redis_unavailable_total{component="cache_lookup"} 39460
+llm_gateway_redis_unavailable_total{component="ledger"} 39440
+llm_gateway_redis_unavailable_total{component="ratelimit"} 39414
+llm_gateway_requests_total{code="200",tenant="loadtest"} 54570
+breaker 21:35:21 open
+breaker 21:35:26 half-open
+breaker 21:35:26 open
+breaker 21:35:31 half-open
+breaker 21:35:31 closed
+```
+</details>
+
+<details><summary>Redis outage: after (8016890), healthy Redis under the heaviest cache load</summary>
+
+```
+== Healthy Redis, after (8016890): zero-latency mocks, cache on, dup ratio 0, 50 streams, 20 s ==
+requests        26397 total, 26397 ok, 0 failed (100.00% success)
+throughput      1318.3 req/s (successful requests / elapsed)
+cache hit rate  0.00% (X-Cache: HIT among successful requests)
+                    n        p50        p95        p99        max
+latency all      26397    38.83ms    49.58ms    54.03ms    66.53ms
+latency miss     26397    38.83ms    49.58ms    54.03ms    66.53ms
+ttft all         26397    32.98ms    43.06ms    46.74ms    56.66ms
+ttft miss        26397    32.98ms    43.06ms    46.74ms    56.66ms
+llm_gateway_redis_breaker_state 0
+(no llm_gateway_redis_unavailable_total or llm_gateway_dependency_errors_total series: zero Redis failures)
 ```
 </details>

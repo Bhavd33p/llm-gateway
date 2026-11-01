@@ -152,6 +152,9 @@ One YAML file (`-config`, default `config.example.yaml`). Unknown keys are rejec
 | `server.shutdown_timeout` | `30s` | How long SIGTERM/SIGINT waits for in-flight requests and streams |
 | `redis.addr`, `redis.db`, `redis.pool_size` | `localhost:6379`, `0`, go-redis default | Redis connection |
 | `redis.password_env` | | Environment variable holding the Redis password |
+| `redis.dial_timeout`, `redis.read_timeout`, `redis.write_timeout`, `redis.pool_timeout` | `50ms` each | Tight on purpose: a dead Redis must cost milliseconds |
+| `redis.max_retries` | `0` | Command retries (go-redis would otherwise retry 3 times) |
+| `redis.breaker_failure_threshold`, `redis.breaker_cooldown` | `5`, `5s` | Consecutive Redis failures that make the gateway skip Redis, and for how long before one probe |
 | `routing.max_attempts` | `3` | Attempts per request across upstreams, including the first |
 | `routing.backoff_base`, `routing.backoff_max` | `50ms`, `1s` | Full-jitter backoff: retry n sleeps `rand(0, min(max, base * 2^n))` |
 | `routing.breaker_failure_threshold` | `5` | Consecutive failures that open an upstream's circuit |
@@ -198,7 +201,9 @@ One YAML file (`-config`, default `config.example.yaml`). Unknown keys are rejec
 | `llm_gateway_tokens_total` | counter | `tenant`, `model`, `kind` |
 | `llm_gateway_estimated_usage_total` | counter | `upstream` |
 | `llm_gateway_unpriced_requests_total` | counter | `model` |
-| `llm_gateway_dependency_errors_total` | counter | `component` (ratelimit, cache, embedder, ledger) |
+| `llm_gateway_redis_unavailable_total` | counter | `component` (ratelimit, cache_lookup, cache_store, ledger) |
+| `llm_gateway_redis_breaker_state` | gauge | (0 closed, 1 half-open, 2 open) |
+| `llm_gateway_dependency_errors_total` | counter | `component`: errors other than a Redis outage |
 
 Useful queries (also the panels in `deploy/grafana/dashboards/llm-gateway.json`):
 
@@ -217,6 +222,22 @@ histogram_quantile(0.95, sum by (le, upstream) (rate(llm_gateway_upstream_reques
 sum by (tenant) (increase(llm_gateway_tenant_spend_usd_total[1h]))
 ```
 
+## When Redis is down
+
+Redis backs optional features, so the gateway keeps answering without it, and does so quickly:
+
+| Feature | While Redis is unavailable |
+|---|---|
+| Rate limiting | Fails open: requests are allowed unchecked (availability over enforcement) |
+| Semantic cache | Fails open: every request is a miss and nothing is stored |
+| Cost ledger | Skipped for the outage; Prometheus spend and token counters keep counting |
+
+Each case increments `llm_gateway_redis_unavailable_total{component}`. The Redis client uses 50 ms timeouts, a single
+dial attempt and no retries, and a circuit breaker skips Redis entirely for 5 s after 5 consecutive failures, then
+probes. Measured with Redis stopped: 5485.04 ms per request at p50 before this change, 0.92 ms after
+([BENCHMARKS.md](BENCHMARKS.md#redis-outage)). The reasoning is in
+[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md#4-design-trade-offs-and-alternatives).
+
 ## Benchmarks
 
 Measured on one Apple M5 Pro laptop with the gateway, Redis, the load generator and **mock upstreams** on the same
@@ -232,6 +253,8 @@ machine, 50 concurrent streaming clients. Full setup, commands, raw output and c
 | Same, cache on (linear scan over up to 1000 entries) | 1316.3 req/s at 0% hits, 1313.7 req/s at 50.22% hits |
 | Failover, heavier upstream failing 50% | 2250 of 2250 requests succeeded; its breaker took it out of rotation, so it received 78 requests (43 failed) |
 | Failover, heavier upstream hard down | 2250 of 2250 succeeded; its breaker let 40 requests through in 30 s |
+| Redis stopped, before vs after the fail-fast fix (10 sequential requests) | 5485.04 ms vs 0.92 ms p50 latency, all 200s |
+| Redis killed and restarted under load (50 streams, 20 s) | 54570 of 54570 succeeded, max latency 62.23 ms |
 
 ## Development
 
