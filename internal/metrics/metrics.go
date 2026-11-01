@@ -34,11 +34,13 @@ type Metrics struct {
 
 	RateLimited *prometheus.CounterVec
 
-	TenantSpendUSD   *prometheus.CounterVec
-	Tokens           *prometheus.CounterVec
-	EstimatedUsage   *prometheus.CounterVec
-	UnpricedModels   *prometheus.CounterVec
-	DependencyErrors *prometheus.CounterVec
+	TenantSpendUSD    *prometheus.CounterVec
+	Tokens            *prometheus.CounterVec
+	EstimatedUsage    *prometheus.CounterVec
+	UnpricedModels    *prometheus.CounterVec
+	DependencyErrors  *prometheus.CounterVec
+	RedisUnavailable  *prometheus.CounterVec
+	RedisBreakerState prometheus.Gauge
 }
 
 // New registers all gateway metrics on reg. Tests pass a fresh prometheus.NewRegistry() so runs don't collide.
@@ -122,8 +124,16 @@ func New(reg prometheus.Registerer) *Metrics {
 		}, []string{"model"}),
 		DependencyErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "llm_gateway_dependency_errors_total",
-			Help: "Redis or embedder failures per component (ratelimit, cache, embedder, ledger). Each fails open: the request is still served.",
+			Help: "Errors other than a Redis outage, per component (ratelimit, cache, embedder, ledger). Each fails open: the request is still served.",
 		}, []string{"component"}),
+		RedisUnavailable: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "llm_gateway_redis_unavailable_total",
+			Help: "Times a feature went without Redis because it was unreachable or its breaker was open: ratelimit (request allowed), cache_lookup (served as a miss), cache_store (answer not cached), ledger (cost not recorded).",
+		}, []string{"component"}),
+		RedisBreakerState: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "llm_gateway_redis_breaker_state",
+			Help: "Redis circuit breaker state: 0 closed, 1 half-open, 2 open (calls skip Redis).",
+		}),
 	}
 
 	reg.MustRegister(
@@ -131,7 +141,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.CacheHits, m.CacheMisses, m.CacheSimilarity, m.CacheEvictions,
 		m.UpstreamDuration, m.UpstreamErrors, m.Failovers, m.BreakerState,
 		m.RateLimited,
-		m.TenantSpendUSD, m.Tokens, m.EstimatedUsage, m.UnpricedModels, m.DependencyErrors,
+		m.TenantSpendUSD, m.Tokens, m.EstimatedUsage, m.UnpricedModels, m.DependencyErrors, m.RedisUnavailable, m.RedisBreakerState,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
