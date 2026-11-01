@@ -1,0 +1,87 @@
+# LLM Gateway configuration for docker-compose (service names instead of localhost).
+# Every field is documented in README.md#configuration. Durations use Go syntax: 250ms, 10s, 24h.
+
+server:
+  addr: ":8080"
+  max_body_bytes: 1048576
+  shutdown_timeout: 30s
+
+redis:
+  addr: "redis:6379"
+  # password_env: REDIS_PASSWORD
+  db: 0
+
+routing:
+  max_attempts: 3               # total tries across upstreams, including the first
+  backoff_base: 50ms            # full-jitter backoff: sleep = rand(0, min(backoff_max, backoff_base * 2^retry))
+  backoff_max: 1s
+  breaker_failure_threshold: 5  # consecutive failures that open an upstream's circuit
+  breaker_cooldown: 10s         # how long an open circuit waits before letting one probe through
+
+upstreams:
+  - name: mock-a
+    type: openai                # OpenAI-compatible: OpenAI, Groq, Together, vLLM, Ollama, the mock provider
+    base_url: http://mock-a:9001/v1
+    weight: 3
+    timeout: 60s
+    first_token_timeout: 10s
+    max_idle_conns: 256
+  - name: mock-b
+    type: openai
+    base_url: http://mock-b:9002/v1
+    weight: 1
+
+  # Real providers. Keys are read from the named environment variables (see .env.example).
+  # - name: openai
+  #   type: openai
+  #   base_url: https://api.openai.com/v1
+  #   api_key_env: OPENAI_API_KEY
+  #   weight: 3
+  # - name: groq
+  #   type: openai
+  #   base_url: https://api.groq.com/openai/v1
+  #   api_key_env: GROQ_API_KEY
+  #   weight: 1
+  #   model_map:                # the client asks for gpt-4o-mini; this upstream serves its own model instead
+  #     gpt-4o-mini: llama-3.1-8b-instant
+  # - name: anthropic
+  #   type: anthropic
+  #   base_url: https://api.anthropic.com
+  #   api_key_env: ANTHROPIC_API_KEY
+  #   weight: 1
+  #   model_map:
+  #     gpt-4o-mini: claude-haiku-4-5
+
+embedder:
+  type: hash                    # hash = deterministic local feature hashing; openai = any /v1/embeddings endpoint
+  dim: 256
+  # type: openai
+  # base_url: https://api.openai.com/v1
+  # api_key_env: OPENAI_API_KEY
+  # model: text-embedding-3-small
+
+cache:
+  enabled: true
+  threshold: 0.95               # minimum cosine similarity to serve a cached response
+  max_entries: 1000             # per tenant; least-recently-used entries are evicted beyond this
+  ttl: 24h
+
+# USD per one million tokens. Example list prices; check your provider's current pricing.
+pricing:
+  gpt-4o-mini: {input_per_million: 0.15, output_per_million: 0.60}
+  gpt-4o: {input_per_million: 2.50, output_per_million: 10.00}
+  llama-3.1-8b-instant: {input_per_million: 0.05, output_per_million: 0.08}
+  claude-haiku-4-5: {input_per_million: 1.00, output_per_million: 5.00}
+
+tenants:
+  # Keys are stored as SHA-256 digests. Generate one with: printf %s 'your-key' | shasum -a 256
+  - name: acme                  # demo key: demo-key-acme
+    api_key_sha256: ["8649cdebee753898fd50e01408a9e438aa5090249bc3e51b65f33dce973b0873"]
+    rate_limit: {requests_per_second: 20, burst: 40}
+  - name: globex                # demo key: demo-key-globex
+    api_key_sha256: ["0aef9a797b1f4523f91fe6c361cd0df88248789ca6cb8cad188d5030ac2f717e"]
+    rate_limit: {requests_per_second: 5, burst: 10}
+    cache: {threshold: 0.9, max_entries: 200}
+  - name: loadtest              # demo key: loadtest-key; generous limit so benchmarks measure the gateway, not the limiter
+    api_key_sha256: ["0dd9be9f9a8be0a0e3c2475ef6993b91b523557deb64651fb326e49e34f87ece"]
+    rate_limit: {requests_per_second: 100000, burst: 100000}
