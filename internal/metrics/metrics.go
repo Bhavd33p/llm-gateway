@@ -83,12 +83,12 @@ func New(reg prometheus.Registerer) *Metrics {
 
 		UpstreamDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "llm_gateway_upstream_request_duration_seconds",
-			Help:    "Duration of each upstream attempt, from sending the request to the last byte (or the failure).",
+			Help:    "Duration of each upstream attempt, from sending the request to the last byte; outcome is ok, error or cancelled.",
 			Buckets: latencyBuckets,
 		}, []string{"upstream", "outcome"}),
 		UpstreamErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "llm_gateway_upstream_errors_total",
-			Help: "Failed upstream attempts, by reason (connect, timeout, status_5xx, status_429, status_4xx, stream).",
+			Help: "Failed upstream attempts, by reason (connect, timeout, status_5xx, status_429, status_4xx, stream, protocol).",
 		}, []string{"upstream", "reason"}),
 		Failovers: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "llm_gateway_failovers_total",
