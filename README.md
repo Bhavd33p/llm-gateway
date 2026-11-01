@@ -105,7 +105,8 @@ for chunk in stream:
 
 Authentication: `Authorization: Bearer <key>` (what OpenAI SDKs send) or `X-API-Key: <key>`.
 
-Request header `Cache-Control: no-cache` skips the semantic cache. Response headers:
+Request header `Cache-Control: no-cache` skips the semantic cache. A cached answer is only served to a request with
+the same model and the same `max_tokens`, `temperature`, `top_p` and `stop`. Response headers:
 
 | Header | Meaning |
 |---|---|
@@ -115,7 +116,9 @@ Request header `Cache-Control: no-cache` skips the semantic cache. Response head
 | `Retry-After` | Seconds to wait, on `429` responses |
 
 Errors use the OpenAI shape, `{"error": {"message": "...", "type": "..."}}`: `401` unknown key, `429` rate limited,
-`502` every attempt failed, `503` every circuit breaker open, and upstream `4xx` passed through. If a stream breaks
+`413` body over `max_body_bytes`, `502` every attempt failed, `503` every circuit breaker open, and upstream `400`,
+`404`, `413` and `422` passed through (an upstream `401` or `403` is about the gateway's provider key, so it fails over
+and surfaces as `502`). If a stream breaks
 after the first chunk, the client receives an in-band `data: {"error": ...}` event and no `[DONE]`.
 
 More examples:
@@ -159,7 +162,7 @@ One YAML file (`-config`, default `config.example.yaml`). Unknown keys are rejec
 | `upstreams[].api_key_env` | | Environment variable holding the provider key (keys never go in YAML) |
 | `upstreams[].weight` | `1` | Share of traffic in weighted round-robin |
 | `upstreams[].timeout` | `60s` | Whole non-streaming request |
-| `upstreams[].first_token_timeout` | `15s` | Stream start to first token; also the response-header timeout |
+| `upstreams[].first_token_timeout` | `15s` | Stream start to first token (includes waiting for response headers) |
 | `upstreams[].max_idle_conns`, `upstreams[].max_conns` | `256`, `0` (unlimited) | Connection pool size per upstream |
 | `upstreams[].model_map` | | Rename the requested model for this upstream, e.g. `gpt-4o-mini: claude-haiku-4-5` |
 | `embedder.type` | `hash` | `hash` (local feature hashing) or `openai` (any `/v1/embeddings`) |

@@ -54,8 +54,9 @@ HTTP stack to mock upstreams).
 
 * `Router.candidates`: the weighted pick first, then the other upstreams by descending weight.
 * `Router.try`: walks the candidates. An upstream whose breaker is open is skipped without spending an attempt.
-  A retryable failure (connection error, timeout, 429, 5xx) records the error, marks the breaker and moves to the next
-  candidate. A 4xx other than 429 is returned to the client immediately: every upstream would reject it.
+  A retryable failure (connection error, timeout, 429, 5xx, and 401/403, which mean this upstream rejected the
+  gateway's own key) records the error, marks the breaker and moves to the next candidate after a backoff. Any other
+  4xx is returned to the client immediately: every upstream would reject the same request.
 * `classify`: turns an error into a metrics reason and a retry decision.
 * `internal/router/breaker.go`, `Breaker`: closed, then open after N consecutive failures, then half-open after a
   cooldown, admitting one probe whose result closes or reopens it.
@@ -76,8 +77,9 @@ HTTP stack to mock upstreams).
 ### "connection pooling"
 
 * `internal/provider/transport.go`, `NewHTTPClient`: one `http.Transport` per upstream with `MaxIdleConnsPerHost`
-  raised from Go's default of 2 to 256, keep-alives, dial and TLS timeouts, and `ResponseHeaderTimeout`. There is no
-  `Client.Timeout` because it would cut long streams off.
+  raised from Go's default of 2 to 256, keep-alives, and dial and TLS timeouts. There is no `Client.Timeout` (it
+  would cut long streams off) and no `ResponseHeaderTimeout` (a non-streaming answer only sends headers when the whole
+  generation is done); per-request contexts carry the deadlines instead.
 * Connections only go back to the pool if the body is read to EOF and closed: `openAIStream.Recv` drains the body on
   `[DONE]`, and `readStatusError` reads and closes error bodies.
 
@@ -96,9 +98,10 @@ HTTP stack to mock upstreams).
   lower-cased with whitespace collapsed.
 * `Cache.Embed` calls an `Embedder` (`embedder.go`): `OpenAIEmbedder` for any `/v1/embeddings` endpoint, or
   `HashEmbedder`, a deterministic local embedder that hashes words and word pairs into a fixed-size signed vector.
-* `Cache.Lookup`: reads the tenant's entry ids from the LRU sorted set, pipelines one `HMGET` (embedding and model)
-  per entry in a single round trip, computes `Cosine` in Go for entries of the same model, and on a hit fetches the
-  answer and bumps its LRU score in one more round trip.
+* `Cache.Lookup`: reads the tenant's entry ids from the LRU sorted set, pipelines one `HMGET` (embedding, model and
+  parameter fingerprint) per entry in a single round trip, computes `Cosine` in Go for entries with the same model
+  and parameters (`ParamsKey`: `max_tokens`, `temperature`, `top_p`, `stop`), and on a hit fetches the answer and
+  bumps its LRU score in one more round trip.
 * `internal/server/chat.go`, `Server.lookup` and `Server.serveHit`: apply the per-tenant threshold, return the cached
   answer as a stream or JSON, and set `X-Cache` and `X-Cache-Similarity`.
 
@@ -232,9 +235,10 @@ Redis Query Engine with an HNSW index answers top-k inside Redis, with a tag fil
 too high rarely hits. 0.95 is conservative. `llm_gateway_cache_best_similarity` records the best similarity of every
 lookup so the threshold can be tuned from data, per tenant.
 
-**What the cache key includes.** The model and every message, so a cached answer is only reused for the same
-conversation. The model is also checked exactly, because two requests to different models must never share an
-answer. Sampling parameters (temperature) are not part of the key: requests that ask for randomness should send
+**What the cache key includes.** The embedding covers the model and every message, so a cached answer is only reused
+for the same conversation. The model and a fingerprint of `max_tokens`, `temperature`, `top_p` and `stop` are also
+compared exactly: two requests to different models must never share an answer, and an answer generated for 500 tokens
+must not be served to a request for 5. Clients that want a fresh sample every time should send
 `Cache-Control: no-cache`.
 
 **LRU in a sorted set.** The ZSET gives `O(log n)` updates and `ZPOPMIN` returns the least recently used ids
@@ -272,8 +276,9 @@ answer is a hit.
   settled at 931 of 1000. A Lua script doing `ZCARD`, `ZPOPMIN` and `DEL` atomically would make it exact.
 * The hash embedder is lexical. It matches rewordings that share words, not synonyms or paraphrases. Production
   should use `embedder.type: openai` with a real embedding model, which adds a network round trip to each lookup.
-* The cache ignores sampling parameters, and serves the answer cached for the requested model name, whichever upstream
-  produced it under `model_map`.
+* Matching ignores letter case and extra whitespace. That suits prose but can be wrong for code, where `Print` and
+  `print` differ. The cache also serves the answer cached for the requested model name, whichever upstream produced it
+  under `model_map` (savings are priced at the model that actually served it).
 * Breaker state and round-robin scores live in each gateway process; replicas do not share them.
 * Rate limits count requests, not LLM tokens.
 * Token counts are estimated (about four characters per token) when the upstream reports no usage, for example when a
@@ -303,7 +308,8 @@ been sent, a retry elsewhere would splice two different answers, and the 200 sta
 the first byte a retry is invisible to the client.
 
 **4. What do you retry, and what not?** Connection errors, timeouts (including no first token in time), 429 and 5xx
-are retried on the next upstream. Other 4xx are returned as-is, because any upstream would reject the same request.
+are retried on the next upstream, and so are 401 and 403, because they mean that upstream rejected the gateway's own
+key. Other 4xx (400, 404, 413, 422) go back to the client as-is, because any upstream would reject the same request.
 Client cancellation stops everything and is not counted against the upstream.
 
 **5. Why full jitter?** Without jitter, clients that failed together retry together and re-create the overload. Full
@@ -311,7 +317,8 @@ jitter spreads them uniformly over the backoff window.
 
 **6. Explain the circuit breaker.** Closed until five consecutive failures, then open: the router skips that upstream
 without spending an attempt. After a 10 s cooldown it is half-open and lets exactly one probe through; success closes
-it, failure reopens it. A probe whose result never arrives stops blocking after another cooldown.
+it, failure reopens it. A success reported while it is open (a slow request that started before it tripped) is
+ignored, so only a probe can close it. A probe whose result never arrives stops blocking after another cooldown.
 
 **7. How does streaming passthrough work?** The adapter reads SSE events, the server writes each one as
 `data: ...\n\n` and calls `Flush`. OpenAI-format chunks are forwarded byte for byte; Anthropic events are translated.
@@ -322,9 +329,9 @@ the upstream request, the upstream connection is closed and the provider stops g
 what was produced.
 
 **9. What did you tune for connection pooling and why?** One `http.Transport` per upstream, `MaxIdleConnsPerHost` from
-the default 2 to 256 so concurrent streams reuse warm TCP/TLS connections instead of redialling, dial, TLS and
-response-header timeouts, no `Client.Timeout` (it would kill long streams), and draining bodies so connections return
-to the pool.
+the default 2 to 256 so concurrent streams reuse warm TCP/TLS connections instead of redialling, dial and TLS
+timeouts, no `Client.Timeout` or `ResponseHeaderTimeout` (they would kill long streams and long non-streaming
+generations; contexts carry deadlines instead), and draining bodies so connections return to the pool.
 
 **10. Why is the rate limiter a Lua script, and why Redis `TIME`?** Atomicity: read, refill, take and write happen as
 one step, so concurrent replicas cannot both take the last token (`TestConcurrentCallsNeverExceedBurst`). One round
@@ -335,7 +342,7 @@ needs two numbers per tenant. Fixed windows allow 2x bursts at the boundary. Sli
 request.
 
 **12. How does the semantic cache decide a hit?** Embed the normalised request (model plus messages), compare against
-every cached entry of the same model by cosine similarity, and serve the best one if it is at or above the tenant's
+every cached entry with the same model and parameters by cosine similarity, and serve the best one if it is at or above the tenant's
 threshold (0.95 by default).
 
 **13. How would you scale the cache past thousands of entries?** Move from the linear scan to a vector index such as

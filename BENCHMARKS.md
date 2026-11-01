@@ -6,6 +6,11 @@ APIs**: the point is to measure what the gateway adds, with an upstream whose la
 
 ## Setup
 
+The runs used the code at commit `403bc08`. Fixes made after a later code review were not re-measured: cache lookups
+now also fetch a short parameter fingerprint per entry (next to the 1 KB embedding), the upstream transport no longer
+sets a response-header timeout (it never fired in these streaming runs), and breaker and error-status handling were
+tightened. The cache-enabled capacity numbers may move slightly because of the extra field.
+
 | | |
 |---|---|
 | Machine | Apple M5 Pro (18 cores), 24 GB RAM, macOS 26.4 (build 25E246) |
