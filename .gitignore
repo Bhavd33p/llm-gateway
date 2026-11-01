@@ -1,0 +1,9 @@
+# Build output
+/bin/
+*.test
+*.out
+coverage.*
+
+# Local secrets and scratch
+.env
+/bench-results/
