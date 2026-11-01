@@ -268,14 +268,14 @@ without it. Each feature has an explicit outage behaviour, counted in
 
 Failing open only helps if failing is quick. With go-redis defaults (5 dial attempts 100 ms apart, then 3 command
 retries) each Redis call spent over a second failing, and a request made four of them: the measured request time with
-Redis down was 5485.04 ms. `internal/redisguard` fixes this in two layers. Tight timeouts (50 ms dial, read, write and
+Redis down was 5454.05 ms. `internal/redisguard` fixes this in two layers. Tight timeouts (50 ms dial, read, write and
 pool wait, one dial attempt, no command retries) bound the first failures. A circuit breaker hook around every
 command and pipeline then opens after 5 consecutive failures and refuses calls locally (no network at all) for a 5 s
 cooldown, then lets one probe through and closes when Redis answers. Measured request time with Redis down after the
-fix: 0.92 ms at p50 (BENCHMARKS.md). The breaker logs each state change once instead of every request logging an error.
+fix: 0.78 ms at p50 (BENCHMARKS.md). The breaker logs each state change once instead of every request logging an error.
 
 The timeouts are tight because the slowest healthy call is small: the heaviest benchmark (1000-entry cache scans at
-1318 req/s) ran with zero Redis timeouts at 50 ms. `/readyz` still pings Redis through the breaker, so an orchestrator
+1246.2 req/s) ran with zero Redis timeouts at 50 ms. `/readyz` still pings Redis through the breaker, so an orchestrator
 sees the gateway as not ready while Redis is down, even though requests are served.
 
 **Integer money.** Floats cannot represent 0.1 exactly and errors accumulate over millions of additions. Prices
@@ -399,7 +399,7 @@ time mostly reflects answer length. A gateway should add almost nothing to TTFT;
 miss and skips the store, and the ledger write is skipped (Prometheus still counts spend); each is counted in
 `llm_gateway_redis_unavailable_total`. Fast matters as much as open: with go-redis defaults a request waited about
 5.5 s on dial retries, so the client has 50 ms timeouts, no retries and a circuit breaker that skips Redis entirely
-for 5 s after 5 consecutive failures. Measured: 5485.04 ms before, 0.92 ms after at p50, and no failed requests when
+for 5 s after 5 consecutive failures. Measured: 5454.05 ms before, 0.78 ms after at p50, and no failed requests when
 Redis was killed and restarted under load. `/readyz` reports not ready so an orchestrator can react.
 
 **21. How does graceful shutdown work with long streams?** On SIGTERM, `http.Server.Shutdown` stops accepting

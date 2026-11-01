@@ -234,7 +234,7 @@ Redis backs optional features, so the gateway keeps answering without it, and do
 
 Each case increments `llm_gateway_redis_unavailable_total{component}`. The Redis client uses 50 ms timeouts, a single
 dial attempt and no retries, and a circuit breaker skips Redis entirely for 5 s after 5 consecutive failures, then
-probes. Measured with Redis stopped: 5485.04 ms per request at p50 before this change, 0.92 ms after
+probes. Measured with Redis stopped: 5454.05 ms per request at p50 before this change, 0.78 ms after
 ([BENCHMARKS.md](BENCHMARKS.md#redis-outage)). The reasoning is in
 [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md#4-design-trade-offs-and-alternatives).
 
@@ -253,8 +253,8 @@ machine, 50 concurrent streaming clients. Full setup, commands, raw output and c
 | Same, cache on (linear scan over up to 1000 entries) | 1316.3 req/s at 0% hits, 1313.7 req/s at 50.22% hits |
 | Failover, heavier upstream failing 50% | 2250 of 2250 requests succeeded; its breaker took it out of rotation, so it received 78 requests (43 failed) |
 | Failover, heavier upstream hard down | 2250 of 2250 succeeded; its breaker let 40 requests through in 30 s |
-| Redis stopped, before vs after the fail-fast fix (10 sequential requests) | 5485.04 ms vs 0.92 ms p50 latency, all 200s |
-| Redis killed and restarted under load (50 streams, 20 s) | 54570 of 54570 succeeded, max latency 62.23 ms |
+| Redis stopped, before vs after the fail-fast fix (10 sequential requests) | 5454.05 ms vs 0.78 ms p50 latency, all 200s |
+| Redis killed and restarted under load (50 streams, 20 s) | 54777 of 54777 succeeded, max latency 67.60 ms |
 
 ## Development
 
