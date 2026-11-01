@@ -34,11 +34,11 @@ type Metrics struct {
 
 	RateLimited *prometheus.CounterVec
 
-	TenantSpendUSD *prometheus.CounterVec
-	Tokens         *prometheus.CounterVec
-	EstimatedUsage *prometheus.CounterVec
-	UnpricedModels *prometheus.CounterVec
-	RedisErrors    *prometheus.CounterVec
+	TenantSpendUSD   *prometheus.CounterVec
+	Tokens           *prometheus.CounterVec
+	EstimatedUsage   *prometheus.CounterVec
+	UnpricedModels   *prometheus.CounterVec
+	DependencyErrors *prometheus.CounterVec
 }
 
 // New registers all gateway metrics on reg. Tests pass a fresh prometheus.NewRegistry() so runs don't collide.
@@ -120,9 +120,9 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name: "llm_gateway_unpriced_requests_total",
 			Help: "Requests for a model missing from the price table (recorded at zero cost).",
 		}, []string{"model"}),
-		RedisErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "llm_gateway_redis_errors_total",
-			Help: "Redis failures per component. Each component fails open so Redis trouble degrades features instead of availability.",
+		DependencyErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "llm_gateway_dependency_errors_total",
+			Help: "Redis or embedder failures per component (ratelimit, cache, embedder, ledger). Each fails open: the request is still served.",
 		}, []string{"component"}),
 	}
 
@@ -131,7 +131,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.CacheHits, m.CacheMisses, m.CacheSimilarity, m.CacheEvictions,
 		m.UpstreamDuration, m.UpstreamErrors, m.Failovers, m.BreakerState,
 		m.RateLimited,
-		m.TenantSpendUSD, m.Tokens, m.EstimatedUsage, m.UnpricedModels, m.RedisErrors,
+		m.TenantSpendUSD, m.Tokens, m.EstimatedUsage, m.UnpricedModels, m.DependencyErrors,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
