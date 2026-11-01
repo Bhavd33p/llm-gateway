@@ -23,9 +23,10 @@ func NewHTTPClient(u config.Upstream) *http.Client {
 		MaxConnsPerHost:       u.MaxConns,     // 0 = unlimited
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   5 * time.Second,
-		ResponseHeaderTimeout: u.FirstTokenTimeout,
 		ExpectContinueTimeout: time.Second,
 	}
-	// No Client.Timeout: it would cut long streams off mid-generation. Deadlines come from each request's context.
+	// No Client.Timeout and no ResponseHeaderTimeout: a non-streaming answer only sends headers once the whole
+	// generation is done, and a stream can run for minutes. Deadlines come from each request's context instead:
+	// the router's first-token timer for streams and the upstream timeout for non-streaming requests.
 	return &http.Client{Transport: transport}
 }
