@@ -4,7 +4,7 @@
 // Key layout. The {tenant} hash tag puts all of a tenant's keys in one Redis Cluster slot, so the MULTI/EXEC
 // that writes an entry together with its index entry works on a cluster too:
 //
-//	sc:{tenant}:e:<id>  HASH  emb (little-endian float32 blob), resp (JSON), model, created_at (unix ms); has a TTL
+//	sc:{tenant}:e:<id>  HASH  emb (little-endian float32 blob), resp (JSON), model, params, created_at (unix ms); has a TTL
 //	sc:{tenant}:lru     ZSET  member <id>, score = last access time (unix ms); the LRU index
 //
 // Lookup is a linear scan: fetch every entry's embedding in one pipelined round trip and compare in Go. That is
@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,9 +31,11 @@ import (
 
 // Entry is the cached answer.
 type Entry struct {
-	Content      string         `json:"content"`
-	FinishReason string         `json:"finish_reason"`
-	Usage        provider.Usage `json:"usage"` // what the original request cost, to report savings on hits
+	Content      string `json:"content"`
+	FinishReason string `json:"finish_reason"`
+	// Usage and ServedModel describe the original upstream call, so a hit can record what it saved at that price.
+	Usage       provider.Usage `json:"usage"`
+	ServedModel string         `json:"served_model"`
 }
 
 type Hit struct {
@@ -70,15 +73,34 @@ func PromptText(model string, messages []provider.Message) string {
 	return b.String()
 }
 
+// ParamsKey fingerprints the request parameters that change what an answer looks like. Entries only match requests
+// with the same fingerprint, so an answer generated with max_tokens=500 is never served to a request for 5 tokens,
+// and a temperature-0 answer is not reused for a temperature-1 request.
+func ParamsKey(req *provider.ChatRequest) string {
+	optInt := func(p *int) string {
+		if p == nil {
+			return "-"
+		}
+		return strconv.Itoa(*p)
+	}
+	optFloat := func(p *float64) string {
+		if p == nil {
+			return "-"
+		}
+		return strconv.FormatFloat(*p, 'g', -1, 64)
+	}
+	return fmt.Sprintf("max_tokens=%s;temperature=%s;top_p=%s;stop=%q", optInt(req.MaxTokens), optFloat(req.Temperature), optFloat(req.TopP), []string(req.Stop))
+}
+
 // Embed embeds a request once; the vector is reused for the lookup and, on a miss, for storing the answer.
 func (c *Cache) Embed(ctx context.Context, model string, messages []provider.Message) ([]float32, error) {
 	return c.embedder.Embed(ctx, PromptText(model, messages))
 }
 
-// Lookup returns the most similar cached entry for the same model if its similarity reaches the tenant's
-// threshold, or nil on a miss. The model is also checked exactly, because similar prompts to different models
-// must not share answers.
-func (c *Cache) Lookup(ctx context.Context, tenant, model string, vec []float32, settings config.Cache) (hit *Hit, err error) {
+// Lookup returns the most similar cached entry with the same model and parameters (see ParamsKey) if its similarity
+// reaches the tenant's threshold, or nil on a miss. Model and parameters are compared exactly, because similar
+// prompts to different models, or with different limits, must not share answers.
+func (c *Cache) Lookup(ctx context.Context, tenant, model, params string, vec []float32, settings config.Cache) (hit *Hit, err error) {
 	defer func() {
 		if hit != nil {
 			c.metrics.CacheHits.WithLabelValues(tenant).Inc()
@@ -92,11 +114,11 @@ func (c *Cache) Lookup(ctx context.Context, tenant, model string, vec []float32,
 		return nil, err
 	}
 
-	// One pipelined round trip fetches every candidate's embedding and model.
+	// One pipelined round trip fetches every candidate's embedding, model and parameters.
 	pipe := c.rdb.Pipeline()
 	cmds := make([]*redis.SliceCmd, len(ids))
 	for i, id := range ids {
-		cmds[i] = pipe.HMGet(ctx, entryKey(tenant, id), "emb", "model")
+		cmds[i] = pipe.HMGet(ctx, entryKey(tenant, id), "emb", "model", "params")
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return nil, err
@@ -108,11 +130,12 @@ func (c *Cache) Lookup(ctx context.Context, tenant, model string, vec []float32,
 		fields := cmd.Val()
 		blob, _ := fields[0].(string)
 		entryModel, _ := fields[1].(string)
+		entryParams, _ := fields[2].(string)
 		if blob == "" {
 			expired = append(expired, ids[i]) // the entry's TTL ran out but its index member remains
 			continue
 		}
-		if entryModel != model {
+		if entryModel != model || entryParams != params {
 			continue
 		}
 		candidate, err := decodeVector([]byte(blob))
@@ -152,7 +175,7 @@ func (c *Cache) Lookup(ctx context.Context, tenant, model string, vec []float32,
 }
 
 // Store saves an answer under a new id and evicts the least-recently-used entries beyond max_entries.
-func (c *Cache) Store(ctx context.Context, tenant, model string, vec []float32, entry Entry, settings config.Cache) error {
+func (c *Cache) Store(ctx context.Context, tenant, model, params string, vec []float32, entry Entry, settings config.Cache) error {
 	payload, err := json.Marshal(entry)
 	if err != nil {
 		return err
@@ -165,7 +188,7 @@ func (c *Cache) Store(ctx context.Context, tenant, model string, vec []float32, 
 
 	// MULTI/EXEC so the entry and its index member appear together.
 	pipe := c.rdb.TxPipeline()
-	pipe.HSet(ctx, entryKey(tenant, id), "emb", encodeVector(vec), "resp", payload, "model", model, "created_at", now)
+	pipe.HSet(ctx, entryKey(tenant, id), "emb", encodeVector(vec), "resp", payload, "model", model, "params", params, "created_at", now)
 	pipe.PExpire(ctx, entryKey(tenant, id), settings.TTL)
 	pipe.ZAdd(ctx, lruKey(tenant), redis.Z{Score: float64(now), Member: id})
 	pipe.PExpire(ctx, lruKey(tenant), settings.TTL) // an idle tenant's index expires along with its entries

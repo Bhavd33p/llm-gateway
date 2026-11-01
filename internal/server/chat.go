@@ -28,9 +28,11 @@ type chatRequest struct {
 	start  time.Time
 	tenant *config.Tenant
 	body   provider.ChatRequest
-	// cacheState is "hit", "miss" or "bypass"; vec is the request embedding, reused to store the answer on a miss.
+	// cacheState is "hit", "miss" or "bypass"; vec is the request embedding and params its parameter fingerprint,
+	// both reused to store the answer on a miss.
 	cacheState string
 	vec        []float32
+	params     string
 }
 
 // chatCompletions is the request pipeline:
@@ -63,6 +65,10 @@ func (s *Server) chatCompletions(rw http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, s.MaxBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req.body); err != nil {
+		if _, tooLarge := errors.AsType[*http.MaxBytesError](err); tooLarge {
+			writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body is too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON body: "+err.Error())
 		return
 	}
@@ -112,8 +118,8 @@ func (s *Server) lookup(r *http.Request, req *chatRequest) *cache.Hit {
 		s.Logger.Warn("embedding failed, skipping cache", "tenant", req.tenant.Name, "err", err)
 		return nil
 	}
-	req.vec, req.cacheState = vec, "miss"
-	hit, err := s.Cache.Lookup(r.Context(), req.tenant.Name, req.body.Model, vec, req.tenant.Cache)
+	req.vec, req.params, req.cacheState = vec, cache.ParamsKey(&req.body), "miss"
+	hit, err := s.Cache.Lookup(r.Context(), req.tenant.Name, req.body.Model, req.params, vec, req.tenant.Cache)
 	if err != nil {
 		s.Metrics.DependencyErrors.WithLabelValues("cache").Inc()
 		s.Logger.Warn("cache lookup failed", "tenant", req.tenant.Name, "err", err)
@@ -155,9 +161,15 @@ func (s *Server) serveHit(w http.ResponseWriter, req *chatRequest, hit *cache.Hi
 		})
 	}
 
+	// Savings are priced like the original call: at the model the upstream actually served, which can differ from
+	// the requested name under model_map.
+	pricedModel := hit.Entry.ServedModel
+	if pricedModel == "" {
+		pricedModel = model
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), afterResponseTimeout)
 	defer cancel()
-	s.record(ctx, cost.Record{Tenant: req.tenant.Name, Model: model, Usage: usage, CacheHit: true})
+	s.record(ctx, cost.Record{Tenant: req.tenant.Name, Model: pricedModel, Usage: usage, CacheHit: true})
 	s.Logger.Info("request", "tenant", req.tenant.Name, "model", model, "stream", req.body.Stream, "cache", "hit",
 		"similarity", hit.Similarity, "duration_ms", time.Since(req.start).Milliseconds())
 }
@@ -261,8 +273,8 @@ func (s *Server) finish(req *chatRequest, served router.Served, usage *provider.
 	if req.vec == nil || !complete || finish != "stop" {
 		return
 	}
-	entry := cache.Entry{Content: content, FinishReason: finish, Usage: *usage}
-	if err := s.Cache.Store(ctx, req.tenant.Name, req.body.Model, req.vec, entry, req.tenant.Cache); err != nil {
+	entry := cache.Entry{Content: content, FinishReason: finish, Usage: *usage, ServedModel: served.Model}
+	if err := s.Cache.Store(ctx, req.tenant.Name, req.body.Model, req.params, req.vec, entry, req.tenant.Cache); err != nil {
 		s.Metrics.DependencyErrors.WithLabelValues("cache").Inc()
 		s.Logger.Warn("cache store failed", "tenant", req.tenant.Name, "err", err)
 	}
@@ -275,20 +287,30 @@ func (s *Server) record(ctx context.Context, rec cost.Record) {
 	}
 }
 
-// writeRouteError maps routing failures to client-facing statuses.
+// writeRouteError maps routing failures to client-facing statuses. Only errors about the request itself are passed
+// through; an upstream 401 or 403 means the gateway's own provider key is wrong, which is a 502 for the client, not
+// a hint that the client's key is bad.
 func (s *Server) writeRouteError(w http.ResponseWriter, req *chatRequest, err error) {
-	var statusErr *provider.StatusError
+	statusErr, isStatus := errors.AsType[*provider.StatusError](err)
 	switch {
 	case errors.Is(err, context.Canceled):
 		return // the client is gone; nobody is listening
 	case errors.Is(err, router.ErrNoHealthyUpstream):
 		writeError(w, http.StatusServiceUnavailable, "upstream_unavailable", err.Error())
-	case errors.As(err, &statusErr) && !statusErr.Retryable():
-		writeError(w, statusErr.StatusCode, "upstream_error", statusErr.Body) // the request itself was rejected
+	case isStatus && passThroughStatus[statusErr.StatusCode]:
+		writeError(w, statusErr.StatusCode, "invalid_request_error", statusErr.Body)
 	default:
 		writeError(w, http.StatusBadGateway, "upstream_error", "all upstream attempts failed")
 	}
 	s.Logger.Warn("routing failed", "tenant", req.tenant.Name, "model", req.body.Model, "err", err)
+}
+
+// passThroughStatus lists upstream statuses that describe the client's request rather than the upstream's health.
+var passThroughStatus = map[int]bool{
+	http.StatusBadRequest:            true,
+	http.StatusNotFound:              true,
+	http.StatusRequestEntityTooLarge: true,
+	http.StatusUnprocessableEntity:   true,
 }
 
 func wantsUsage(req *provider.ChatRequest) bool {

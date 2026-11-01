@@ -48,7 +48,7 @@ func (tc *testCache) store(t *testing.T, tenant, model, prompt string, s config.
 	t.Helper()
 	msgs := []provider.Message{{Role: "user", Content: prompt}}
 	vec, _ := tc.Embed(context.Background(), model, msgs)
-	if err := tc.Store(context.Background(), tenant, model, vec, Entry{Content: "answer to " + prompt, FinishReason: "stop"}, s); err != nil {
+	if err := tc.Store(context.Background(), tenant, model, "", vec, Entry{Content: "answer to " + prompt, FinishReason: "stop"}, s); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
 }
@@ -57,7 +57,7 @@ func (tc *testCache) lookup(t *testing.T, tenant, model, prompt string, s config
 	t.Helper()
 	msgs := []provider.Message{{Role: "user", Content: prompt}}
 	vec, _ := tc.Embed(context.Background(), model, msgs)
-	hit, err := tc.Lookup(context.Background(), tenant, model, vec, s)
+	hit, err := tc.Lookup(context.Background(), tenant, model, "", vec, s)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestCacheKeyLayout(t *testing.T) {
 		t.Fatalf("LRU index has %d members, want 1", len(ids))
 	}
 	fields := tc.rdb.HGetAll(ctx, "sc:{"+tenant+"}:e:"+ids[0]).Val()
-	if len(fields["emb"]) != 256*4 || fields["model"] != "m" || fields["created_at"] == "" || fields["resp"] == "" {
+	if _, ok := fields["params"]; !ok || len(fields["emb"]) != 256*4 || fields["model"] != "m" || fields["created_at"] == "" || fields["resp"] == "" {
 		t.Errorf("entry hash fields = %v", fields)
 	}
 	if ttl := tc.rdb.TTL(ctx, "sc:{"+tenant+"}:e:"+ids[0]).Val(); ttl <= 0 || ttl > time.Hour {
@@ -165,7 +165,7 @@ func TestExpiredEntriesAreSkippedAndPruned(t *testing.T) {
 	vec, _ := c.Embed(ctx, "m", msgs)
 	short := config.Cache{Threshold: 0.95, MaxEntries: 10, TTL: time.Minute}
 
-	if err := c.Store(ctx, "acme", "m", vec, Entry{Content: "hi"}, short); err != nil {
+	if err := c.Store(ctx, "acme", "m", "", vec, Entry{Content: "hi"}, short); err != nil {
 		t.Fatal(err)
 	}
 	// Entry expires; recreate the index member as if it had outlived the entry.
@@ -173,11 +173,35 @@ func TestExpiredEntriesAreSkippedAndPruned(t *testing.T) {
 	mini.FastForward(2 * time.Minute)
 	rdb.ZAdd(ctx, lruKey("acme"), redis.Z{Score: 1, Member: ids[0]})
 
-	hit, err := c.Lookup(ctx, "acme", "m", vec, short)
+	hit, err := c.Lookup(ctx, "acme", "m", "", vec, short)
 	if err != nil || hit != nil {
 		t.Fatalf("expired entry must not be served: hit=%v err=%v", hit, err)
 	}
 	if n := rdb.ZCard(ctx, lruKey("acme")).Val(); n != 0 {
 		t.Errorf("stale index member should be pruned, %d left", n)
+	}
+}
+
+func TestCacheRequiresSameParameters(t *testing.T) {
+	tc := newTestCache(t)
+	tenant := uniqueTenant()
+	ctx := context.Background()
+	msgs := []provider.Message{{Role: "user", Content: "write a long essay about redis"}}
+	vec, _ := tc.Embed(ctx, "m", msgs)
+	long, short := 500, 5
+	longKey := ParamsKey(&provider.ChatRequest{MaxTokens: &long})
+	shortKey := ParamsKey(&provider.ChatRequest{MaxTokens: &short})
+	if longKey == shortKey || ParamsKey(&provider.ChatRequest{}) == longKey {
+		t.Fatalf("parameter fingerprints should differ: %q %q", longKey, shortKey)
+	}
+
+	if err := tc.Store(ctx, tenant, "m", longKey, vec, Entry{Content: "a very long essay"}, settings); err != nil {
+		t.Fatal(err)
+	}
+	if hit, _ := tc.Lookup(ctx, tenant, "m", shortKey, vec, settings); hit != nil {
+		t.Error("an answer generated with max_tokens=500 must not be served to a max_tokens=5 request")
+	}
+	if hit, _ := tc.Lookup(ctx, tenant, "m", longKey, vec, settings); hit == nil {
+		t.Error("the same parameters should hit")
 	}
 }

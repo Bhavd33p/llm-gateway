@@ -202,7 +202,8 @@ func TestStreamingMissThenSemanticHit(t *testing.T) {
 		t.Errorf("upstream latency samples = %d, want 1", got)
 	}
 	ledger, _ := g.ledger.Month(context.Background(), g.tenant)
-	if ledger["requests"] != 1 || ledger["cache_hits"] != 1 || ledger["completion_tokens"] != 8 || ledger["estimated_requests"] != 0 {
+	if ledger["requests"] != 1 || ledger["cache_hits"] != 1 || ledger["completion_tokens"] != 8 || ledger["estimated_requests"] != 0 ||
+		ledger["saved_micro_usd"] != ledger["spend_micro_usd"] {
 		t.Errorf("ledger = %v", ledger)
 	}
 }
@@ -375,6 +376,28 @@ func TestUsageAndMetricsEndpoints(t *testing.T) {
 	for _, name := range []string{"llm_gateway_cache_misses_total", "llm_gateway_ttft_seconds_bucket", "llm_gateway_upstream_request_duration_seconds_bucket", "llm_gateway_tenant_spend_usd_total"} {
 		if !strings.Contains(string(text), name) {
 			t.Errorf("/metrics is missing %s", name)
+		}
+	}
+}
+
+func TestOversizedBodyReturns413(t *testing.T) {
+	g := newGateway(t, generous, mockllm.Config{Name: "mock-a"})
+	huge := `{"model":"gpt-4o-mini","messages":[{"role":"user","content":"` + strings.Repeat("a", 2<<20) + `"}]}`
+	resp := g.post(t, context.Background(), huge)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+}
+
+func TestDifferentMaxTokensMisses(t *testing.T) {
+	g := newGateway(t, generous, mockllm.Config{Name: "mock-a", Tokens: 4})
+	for i, maxTokens := range []string{"500", "5"} {
+		resp := g.post(t, context.Background(), `{"model":"gpt-4o-mini","max_tokens":`+maxTokens+`,"messages":[{"role":"user","content":"Write an essay"}]}`)
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.Header.Get("X-Cache") != "MISS" {
+			t.Fatalf("request %d (max_tokens=%s): X-Cache = %q, want MISS", i, maxTokens, resp.Header.Get("X-Cache"))
 		}
 	}
 }
