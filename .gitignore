@@ -1,5 +1,8 @@
-# Build output
+# Build output (`make build` writes to bin/; a bare `go build` in the repo root writes these)
 /bin/
+/gateway
+/mockprovider
+/loadtest
 *.test
 *.out
 coverage.*
