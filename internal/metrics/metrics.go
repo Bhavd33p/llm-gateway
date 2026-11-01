@@ -124,7 +124,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		}, []string{"model"}),
 		DependencyErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "llm_gateway_dependency_errors_total",
-			Help: "Errors other than a Redis outage, per component (ratelimit, cache, embedder, ledger). Each fails open: the request is still served.",
+			Help: "Errors other than a Redis outage, per component (ratelimit, cache_lookup, cache_store, embedder, ledger). Each fails open: the request is still served.",
 		}, []string{"component"}),
 		RedisUnavailable: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "llm_gateway_redis_unavailable_total",
