@@ -225,13 +225,13 @@ machine, 50 concurrent streaming clients. Full setup, commands, raw output and c
 
 | Scenario | Result |
 |---|---|
-| Gateway overhead on TTFT (mock with 100 ms to first token, cache bypassed) | +1.63 ms p50, +6.33 ms p99 (103.64 / 111.33 ms vs 102.01 / 105.00 ms direct) |
-| Cache hit vs upstream answer (same run, 49.62% hit rate) | 3.94 ms p50 / 10.42 ms p99 vs 620.92 ms p50 / 641.39 ms p99 |
-| Throughput at 49.62% hits vs 0% hits (realistic mocks) | 156.4 req/s vs 76.7 req/s |
-| Gateway ceiling, cache bypassed (zero-latency mocks) | 3538.7 req/s, p99 latency 18.27 ms |
-| Same, cache on (linear scan over roughly 900 entries) | 1442.4 req/s at 0% hits, 1587.9 req/s at 50.07% hits |
-| Failover, heavier upstream failing 50% | 2321 of 2321 requests succeeded, 848 failovers |
-| Failover, heavier upstream hard down | 2360 of 2360 succeeded; its breaker let 40 requests through in 30 s |
+| Gateway overhead on TTFT (mock with 100 ms to first token, cache bypassed) | +2.06 ms p50, +6.63 ms p99 (104.05 / 111.09 ms vs 101.99 / 104.46 ms direct) |
+| Cache hit vs upstream answer (same run, 49.81% hit rate) | 4.26 ms p50 / 12.03 ms p99 vs 651.63 ms p50 / 685.95 ms p99 |
+| Throughput at 49.81% hits vs 0% hits (realistic mocks) | 150.9 req/s vs 73.6 req/s |
+| Gateway ceiling, cache bypassed (zero-latency mocks) | 3556.9 req/s, p99 latency 18.45 ms |
+| Same, cache on (linear scan over up to 1000 entries) | 1316.3 req/s at 0% hits, 1313.7 req/s at 50.22% hits |
+| Failover, heavier upstream failing 50% | 2250 of 2250 requests succeeded; its breaker took it out of rotation, so it received 78 requests (43 failed) |
+| Failover, heavier upstream hard down | 2250 of 2250 succeeded; its breaker let 40 requests through in 30 s |
 
 ## Development
 

@@ -39,9 +39,9 @@ HTTP stack to mock upstreams).
 * `internal/provider/openai.go` (`OpenAI`) and `internal/provider/anthropic.go` (`Anthropic`): adapters behind the
   `Provider` interface in `provider.go`. The rest of the gateway only sees OpenAI-format types, so adding a provider
   means writing one adapter.
-* Throughput, measured (BENCHMARKS.md): with zero-latency mock upstreams the gateway served 3538.7 req/s at 50
-  concurrent streams with p99 18.27 ms when the cache was bypassed, and 1442.4 to 1587.9 req/s with the cache on. Its
-  added time to first token was 1.63 ms at p50 against a mock with a 100 ms first token.
+* Throughput, measured (BENCHMARKS.md): with zero-latency mock upstreams the gateway served 3556.9 req/s at 50
+  concurrent streams with p99 18.45 ms when the cache was bypassed, and about 1314 to 1316 req/s with the cache on. Its
+  added time to first token was 2.06 ms at p50 (6.63 ms at p99) against a mock with a 100 ms first token.
 
 ### "weighted routing"
 
@@ -204,7 +204,7 @@ Non-streaming requests take the same path with `Router.Complete` and one JSON re
 **Smooth weighted round-robin instead of weighted random.** Both give the configured shares on average. Weighted
 random has variance: with weights 3:1, a run of eight picks to the small upstream is possible and bursts hurt a
 small provider quota. SWRR is deterministic, exact over every `sum(weights)` picks and interleaved. It needs a mutex
-around the scores; a whole routing decision (pick plus failover order) measured 89.14 ns (`BenchmarkPick`). Across several gateway replicas each replica
+around the scores; a whole routing decision (pick plus failover order) measured 91.03 ns (`BenchmarkPick`). Across several gateway replicas each replica
 interleaves independently, which still gives the right shares overall.
 
 **Retry only before the first byte.** An LLM answer is not idempotent: a second upstream produces a different
@@ -227,8 +227,8 @@ benchmark shows it works: with an upstream hard down it received 40 requests in 
 provider (its connections cannot crowd out others) and allow per-provider limits such as `max_conns`.
 
 **Semantic cache as a linear scan.** Simple, exact (no approximate-nearest-neighbour recall loss) and fast enough for
-hundreds of entries. Its cost grows linearly: around 900 entries of 1 KB, a lookup moves about 1 MB from Redis, and
-the zero-latency benchmark shows that capping the gateway at roughly 1500 req/s. The next step is a vector index:
+hundreds of entries. Its cost grows linearly: at 1000 entries of 1 KB, a lookup moves about 1 MB from Redis, and
+the zero-latency benchmark shows that capping the gateway at about 1300 req/s. The next step is a vector index:
 Redis Query Engine with an HNSW index answers top-k inside Redis, with a tag filter on tenant and model.
 
 **Threshold choice.** Too low serves wrong answers ("capital of France" vs "capital of Germany" are lexically close);
@@ -272,8 +272,8 @@ answer is a hit.
   and fields the gateway does not model are dropped. The Anthropic adapter rejects the `tool` role, clamps
   temperature to Anthropic's 0 to 1 range, and merges consecutive messages from the same role.
 * The semantic cache scans linearly; cost grows with `max_entries` (see section 4). Under concurrent stores the
-  eviction can remove a few more entries than necessary: in the 0%-hit benchmark at 50 concurrent clients the index
-  settled at 931 of 1000. A Lua script doing `ZCARD`, `ZPOPMIN` and `DEL` atomically would make it exact.
+  eviction can remove a few more entries than necessary: after the zero-latency 0%-hit benchmark at 50 concurrent
+  clients the index held 956 of 1000. A Lua script doing `ZCARD`, `ZPOPMIN` and `DEL` atomically would make it exact.
 * The hash embedder is lexical. It matches rewordings that share words, not synonyms or paraphrases. Production
   should use `embedder.type: openai` with a real embedding model, which adds a network round trip to each lookup.
 * Matching ignores letter case and extra whitespace. That suits prose but can be wrong for code, where `Print` and
@@ -370,7 +370,7 @@ percentile, so accuracy depends on the bucket boundaries. Averages hide tails, w
 are histograms, not gauges.
 
 **19. Why measure TTFT separately from total latency?** For streaming UIs, the user perceives the first token; total
-time mostly reflects answer length. A gateway should add almost nothing to TTFT; the benchmark measured 1.63 ms at p50.
+time mostly reflects answer length. A gateway should add almost nothing to TTFT; the benchmark measured 2.06 ms at p50.
 
 **20. What happens if Redis goes down?** Requests are still served: rate limiting fails open, the cache misses, ledger
 writes fail and are counted. `/readyz` reports not ready so an orchestrator can react.
@@ -380,9 +380,10 @@ connections and waits up to 30 s for in-flight requests, including open streams.
 remaining connections, which cancels their contexts and the upstream calls.
 
 **22. How did you load test and what did you find?** A Go load generator with 50 concurrent streaming clients against
-mock upstreams with known latency, on one machine. Gateway TTFT overhead 1.63 ms p50 / 6.33 ms p99; cache hits 3.94 ms
-p50 vs 620.92 ms for upstream answers; throughput doubled at a 49.62% hit rate; 100% success with the heavier upstream
-failing half its requests; the cache's linear scan is the first bottleneck at about 1500 req/s.
+mock upstreams with known latency, on one machine. Gateway TTFT overhead 2.06 ms p50 / 6.63 ms p99; cache hits 4.26 ms
+p50 vs 651.63 ms for upstream answers; throughput roughly doubled (73.6 to 150.9 req/s) at a 49.81% hit rate; 100%
+success with the heavier upstream failing half its requests, because its breaker took it out of rotation; the cache's
+linear scan is the first bottleneck at about 1300 req/s.
 
 **23. What would you add for production?** A vector index for the cache, per-model route groups, tool-call
 translation, token-based rate limits, shared breaker state or outlier detection, OpenTelemetry tracing per attempt,
