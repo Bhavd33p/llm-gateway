@@ -118,7 +118,8 @@ takes hundreds of milliseconds, a hit is still far cheaper than a call, as the r
 ### Redis outage
 
 The fail-fast change was measured separately from the runs above, on the same machine: "before" is commit `9980b08`,
-"after" is commit `8016890` (later commits only change docs and the dashboard). The gateway used `config.example.yaml`
+"after" is commit `8016890` plus one metric help-text change committed afterwards as `52f255f` (later commits only
+change docs, the dashboard and that help text). The gateway used `config.example.yaml`
 with `redis.addr` set to `127.0.0.1:6489` and both mocks at zero latency, so request time is the gateway's own time.
 "Redis down" means nothing listening on that port, so every connection is refused.
 
