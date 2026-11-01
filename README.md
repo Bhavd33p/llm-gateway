@@ -132,9 +132,10 @@ curl -N http://localhost:8080/v1/chat/completions -H "Authorization: Bearer demo
 # Spend so far this month
 curl http://localhost:8080/v1/usage -H "Authorization: Bearer demo-key-acme"
 
-# Watch the rate limiter (globex: 5 req/s, burst 10)
-for i in $(seq 1 15); do curl -s -o /dev/null -w "%{http_code} " http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer demo-key-globex" -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'; done
+# Watch the rate limiter (globex: 5 req/s, burst 10): 15 parallel requests give 10 x 200 and 5 x 429
+for i in $(seq 1 15); do curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer demo-key-globex" -H "Cache-Control: no-cache" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}' & done | sort | uniq -c
 ```
 
 ## Configuration
