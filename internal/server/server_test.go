@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/Bhavd33p/llm-gateway/internal/cache"
 	"github.com/Bhavd33p/llm-gateway/internal/config"
@@ -24,6 +26,7 @@ import (
 	"github.com/Bhavd33p/llm-gateway/internal/mockllm"
 	"github.com/Bhavd33p/llm-gateway/internal/provider"
 	"github.com/Bhavd33p/llm-gateway/internal/ratelimit"
+	"github.com/Bhavd33p/llm-gateway/internal/redisguard"
 	"github.com/Bhavd33p/llm-gateway/internal/redistest"
 	"github.com/Bhavd33p/llm-gateway/internal/router"
 )
@@ -46,7 +49,11 @@ func newGateway(t *testing.T, limit config.RateLimit, mocks ...mockllm.Config) *
 	t.Helper()
 	rdb, _ := redistest.New(t)
 	reg := prometheus.NewRegistry()
-	m := metrics.New(reg)
+	return newGatewayWith(t, rdb, reg, metrics.New(reg), limit, mocks...)
+}
+
+func newGatewayWith(t *testing.T, rdb *redis.Client, reg *prometheus.Registry, m *metrics.Metrics, limit config.RateLimit, mocks ...mockllm.Config) *gateway {
+	t.Helper()
 	g := &gateway{registry: reg, metrics: m}
 
 	var upstreams []router.Upstream
@@ -399,5 +406,54 @@ func TestDifferentMaxTokensMisses(t *testing.T) {
 		if resp.Header.Get("X-Cache") != "MISS" {
 			t.Fatalf("request %d (max_tokens=%s): X-Cache = %q, want MISS", i, maxTokens, resp.Header.Get("X-Cache"))
 		}
+	}
+}
+
+func TestRedisDownRequestsStayFast(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadAddr := l.Addr().String()
+	l.Close() // nothing listens here: every connection attempt is refused
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	rdb := redisguard.NewClient(config.Redis{
+		Addr: deadAddr, DialTimeout: 50 * time.Millisecond, ReadTimeout: 50 * time.Millisecond,
+		WriteTimeout: 50 * time.Millisecond, PoolTimeout: 50 * time.Millisecond,
+		BreakerFailureThreshold: 5, BreakerCooldown: time.Minute,
+	}, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { rdb.Close() })
+	g := newGatewayWith(t, rdb, reg, m, config.RateLimit{RequestsPerSecond: 0.001, Burst: 1}, mockllm.Config{Name: "mock-a", Tokens: 5})
+
+	// Three requests would exceed the burst of 1 if the limiter worked; with Redis down it fails open instead.
+	for i := range 3 {
+		start := time.Now()
+		resp := g.post(t, context.Background(), streamBody)
+		content, done, _ := readSSE(t, resp.Body)
+		resp.Body.Close()
+		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+			t.Fatalf("request %d took %v with Redis down, want under 200ms", i, elapsed)
+		}
+		if resp.StatusCode != 200 || !done || content == "" || resp.Header.Get("X-Cache") != "MISS" {
+			t.Fatalf("request %d: status=%d done=%v X-Cache=%q, want a normal answer served as a cache miss", i, resp.StatusCode, done, resp.Header.Get("X-Cache"))
+		}
+	}
+
+	for _, component := range []string{"ratelimit", "cache_lookup", "ledger"} {
+		if got := testutil.ToFloat64(m.RedisUnavailable.WithLabelValues(component)); got != 3 {
+			t.Errorf("redis_unavailable{component=%q} = %v, want 3", component, got)
+		}
+	}
+	if got := testutil.ToFloat64(m.RedisUnavailable.WithLabelValues("cache_store")); got != 0 {
+		t.Errorf("cache_store attempts = %v, want 0: a failed lookup should skip the store", got)
+	}
+	// 3 requests x 3 Redis calls passes the breaker threshold of 5, so it is now open and Redis is skipped entirely.
+	if got := testutil.ToFloat64(m.RedisBreakerState); got != 2 {
+		t.Errorf("redis breaker state = %v, want 2 (open)", got)
+	}
+	if got := testutil.ToFloat64(m.TenantSpendUSD.WithLabelValues(g.tenant, "gpt-4o-mini")); got <= 0 {
+		t.Error("the Prometheus spend counter should still count while the ledger is skipped")
 	}
 }

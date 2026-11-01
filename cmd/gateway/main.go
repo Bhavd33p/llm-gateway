@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/Bhavd33p/llm-gateway/internal/cache"
 	"github.com/Bhavd33p/llm-gateway/internal/config"
@@ -23,6 +22,7 @@ import (
 	"github.com/Bhavd33p/llm-gateway/internal/metrics"
 	"github.com/Bhavd33p/llm-gateway/internal/provider"
 	"github.com/Bhavd33p/llm-gateway/internal/ratelimit"
+	"github.com/Bhavd33p/llm-gateway/internal/redisguard"
 	"github.com/Bhavd33p/llm-gateway/internal/router"
 	"github.com/Bhavd33p/llm-gateway/internal/server"
 )
@@ -51,12 +51,10 @@ func run(configPath string, logger *slog.Logger) error {
 		return err
 	}
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     cfg.Redis.Addr,
-		Password: cfg.Redis.Password,
-		DB:       cfg.Redis.DB,
-		PoolSize: cfg.Redis.PoolSize, // 0 = go-redis default of 10 per CPU
-	})
+	registry := prometheus.NewRegistry()
+	m := metrics.New(registry)
+
+	rdb := redisguard.NewClient(cfg.Redis, m, logger)
 	defer rdb.Close()
 	pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -64,9 +62,6 @@ func run(configPath string, logger *slog.Logger) error {
 		// Not fatal: every Redis-backed feature fails open, and /readyz reports the problem.
 		logger.Warn("redis is not reachable at startup", "addr", cfg.Redis.Addr, "err", err)
 	}
-
-	registry := prometheus.NewRegistry()
-	m := metrics.New(registry)
 
 	var upstreams []router.Upstream
 	for _, u := range cfg.Upstreams {

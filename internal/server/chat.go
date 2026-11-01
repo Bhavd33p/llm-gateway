@@ -16,6 +16,7 @@ import (
 	"github.com/Bhavd33p/llm-gateway/internal/config"
 	"github.com/Bhavd33p/llm-gateway/internal/cost"
 	"github.com/Bhavd33p/llm-gateway/internal/provider"
+	"github.com/Bhavd33p/llm-gateway/internal/redisguard"
 	"github.com/Bhavd33p/llm-gateway/internal/router"
 )
 
@@ -88,13 +89,12 @@ func (s *Server) chatCompletions(rw http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// allow applies the tenant's token bucket. If Redis is unreachable the request is let through: a rate limiter
-// outage should not become a gateway outage.
+// allow applies the tenant's token bucket. If Redis is unreachable the request is let through (fail open): a
+// rate limiter outage should not become a gateway outage, at the price of not enforcing limits until Redis is back.
 func (s *Server) allow(w http.ResponseWriter, r *http.Request, tenant *config.Tenant) bool {
 	res, err := s.Limiter.Allow(r.Context(), tenant.Name, tenant.RateLimit)
 	if err != nil {
-		s.Metrics.DependencyErrors.WithLabelValues("ratelimit").Inc()
-		s.Logger.Warn("rate limiter unavailable, failing open", "tenant", tenant.Name, "err", err)
+		s.redisFailed("ratelimit", err, "tenant", tenant.Name)
 		return true
 	}
 	if res.Allowed {
@@ -107,7 +107,7 @@ func (s *Server) allow(w http.ResponseWriter, r *http.Request, tenant *config.Te
 }
 
 // lookup embeds the request and searches the tenant's cache. "Cache-Control: no-cache" skips the cache entirely.
-// Any embedder or Redis failure degrades to a miss.
+// Any embedder or Redis failure degrades to a miss; if Redis is unreachable the answer is not stored either.
 func (s *Server) lookup(r *http.Request, req *chatRequest) *cache.Hit {
 	if !req.tenant.Cache.IsEnabled() || strings.Contains(r.Header.Get("Cache-Control"), "no-cache") {
 		return nil
@@ -121,8 +121,10 @@ func (s *Server) lookup(r *http.Request, req *chatRequest) *cache.Hit {
 	req.vec, req.params, req.cacheState = vec, cache.ParamsKey(&req.body), "miss"
 	hit, err := s.Cache.Lookup(r.Context(), req.tenant.Name, req.body.Model, req.params, vec, req.tenant.Cache)
 	if err != nil {
-		s.Metrics.DependencyErrors.WithLabelValues("cache").Inc()
-		s.Logger.Warn("cache lookup failed", "tenant", req.tenant.Name, "err", err)
+		s.redisFailed("cache_lookup", err, "tenant", req.tenant.Name)
+		if redisguard.IsUnavailable(err) {
+			req.vec = nil // don't spend another Redis call trying to store the answer
+		}
 		return nil
 	}
 	if hit != nil {
@@ -275,16 +277,28 @@ func (s *Server) finish(req *chatRequest, served router.Served, usage *provider.
 	}
 	entry := cache.Entry{Content: content, FinishReason: finish, Usage: *usage, ServedModel: served.Model}
 	if err := s.Cache.Store(ctx, req.tenant.Name, req.body.Model, req.params, req.vec, entry, req.tenant.Cache); err != nil {
-		s.Metrics.DependencyErrors.WithLabelValues("cache").Inc()
-		s.Logger.Warn("cache store failed", "tenant", req.tenant.Name, "err", err)
+		s.redisFailed("cache_store", err, "tenant", req.tenant.Name)
 	}
 }
 
+// record writes the request to the cost ledger. If Redis is unreachable the ledger entry is skipped and counted in
+// llm_gateway_redis_unavailable_total{component="ledger"}; the Prometheus spend and token counters still increase.
 func (s *Server) record(ctx context.Context, rec cost.Record) {
 	if _, err := s.Ledger.Record(ctx, rec); err != nil {
-		s.Metrics.DependencyErrors.WithLabelValues("ledger").Inc()
-		s.Logger.Error("ledger write failed", "tenant", rec.Tenant, "model", rec.Model, "err", err)
+		s.redisFailed("ledger", err, "tenant", rec.Tenant, "model", rec.Model)
 	}
+}
+
+// redisFailed counts a Redis-backed feature that had to go without Redis. An outage (unreachable, or breaker open)
+// repeats on every request, so it is only counted; the Redis client logs each breaker state change once. Any other
+// error is unexpected and is also logged.
+func (s *Server) redisFailed(component string, err error, attrs ...any) {
+	if redisguard.IsUnavailable(err) {
+		s.Metrics.RedisUnavailable.WithLabelValues(component).Inc()
+		return
+	}
+	s.Metrics.DependencyErrors.WithLabelValues(component).Inc()
+	s.Logger.Warn(component+" failed", append(attrs, "err", err)...)
 }
 
 // writeRouteError maps routing failures to client-facing statuses. Only errors about the request itself are passed
