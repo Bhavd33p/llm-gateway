@@ -654,6 +654,90 @@
         "w": 12,
         "h": 8
       }
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis unavailable: features running without Redis",
+      "description": "ratelimit = request allowed unchecked, cache_lookup = served as a miss, cache_store = answer not cached, ledger = cost not recorded.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (component) (rate(llm_gateway_redis_unavailable_total[1m]))",
+          "legendFormat": "{{component}}"
+        }
+      ],
+      "id": 15,
+      "gridPos": {
+        "x": 0,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis circuit breaker state (0 closed, 1 half-open, 2 open)",
+      "description": "While open, the gateway skips Redis entirely.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "expr": "llm_gateway_redis_breaker_state",
+          "legendFormat": "redis"
+        }
+      ],
+      "id": 16,
+      "gridPos": {
+        "x": 12,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      }
     }
   ]
 }
