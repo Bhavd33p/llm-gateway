@@ -121,25 +121,22 @@ func (r *Router) try(ctx context.Context, attempt func(context.Context, *upstrea
 		lastErr  error
 		previous *upstream
 		attempts int
-		skipped  int
+		next     int
 	)
-	for i := 0; attempts < r.maxAttempts; i++ {
-		u := candidates[i%len(candidates)]
-		if !u.breaker.Allow() {
-			if skipped++; skipped == len(candidates) {
-				break
-			}
-			continue
-		}
-		skipped = 0
-
+	for attempts < r.maxAttempts {
 		if attempts > 0 {
 			if err := sleep(ctx, r.backoff.Delay(attempts-1)); err != nil {
 				return nil, attempts, err
 			}
-			if u != previous {
-				r.metrics.Failovers.WithLabelValues(previous.name, u.name).Inc()
-			}
+		}
+		// Ask the breakers only after the backoff, so a half-open probe slot is never claimed and then abandoned
+		// by a client that gives up while we sleep.
+		u := nextAllowed(candidates, &next)
+		if u == nil {
+			break // every breaker is open
+		}
+		if previous != nil && u != previous {
+			r.metrics.Failovers.WithLabelValues(previous.name, u.name).Inc()
 		}
 		attempts++
 		start := time.Now()
@@ -166,6 +163,18 @@ func (r *Router) try(ctx context.Context, attempt func(context.Context, *upstrea
 		return nil, attempts, ErrNoHealthyUpstream
 	}
 	return nil, attempts, fmt.Errorf("all %d attempts failed, last error: %w", attempts, lastErr)
+}
+
+// nextAllowed returns the next candidate, cycling from *next, whose breaker admits a request, or nil if none does.
+func nextAllowed(candidates []*upstream, next *int) *upstream {
+	for range len(candidates) {
+		u := candidates[*next%len(candidates)]
+		*next++
+		if u.breaker.Allow() {
+			return u
+		}
+	}
+	return nil
 }
 
 func (r *Router) Complete(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, Served, error) {
