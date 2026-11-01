@@ -1,0 +1,68 @@
+# Local stack: gateway + Redis + two mock upstreams + Prometheus + Grafana.
+#   docker compose up --build
+#   gateway http://localhost:8080   prometheus http://localhost:9090   grafana http://localhost:3300 (anonymous viewer)
+
+x-app: &app
+  build: .
+  image: llm-gateway:local
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    # volatile-lru is the memory safety net: under memory pressure Redis evicts only keys that have a TTL (cache
+    # entries, rate-limit buckets), never the cost ledger, which has none.
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mock-a:
+    <<: *app
+    entrypoint: ["/usr/local/bin/mockprovider"]
+    command: ["-addr", ":9001", "-name", "mock-a", "-latency", "150ms", "-token-delay", "15ms", "-tokens", "60"]
+
+  mock-b:
+    <<: *app
+    entrypoint: ["/usr/local/bin/mockprovider"]
+    # A slower, occasionally failing upstream, so failover and the circuit breaker have something to do.
+    command: ["-addr", ":9002", "-name", "mock-b", "-latency", "300ms", "-token-delay", "20ms", "-tokens", "60", "-fail-rate", "0.05"]
+
+  gateway:
+    <<: *app
+    command: ["-config", "/etc/llm-gateway/config.yaml"]
+    volumes:
+      - ./deploy/config.compose.yaml:/etc/llm-gateway/config.yaml:ro
+    env_file:
+      - path: .env
+        required: false
+    ports: ["8080:8080"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      mock-a:
+        condition: service_started
+      mock-b:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    depends_on: [gateway]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/llm-gateway.json
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3300:3000"]
+    depends_on: [prometheus]
